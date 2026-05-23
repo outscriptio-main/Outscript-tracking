@@ -10,20 +10,24 @@ import { createClient } from "@supabase/supabase-js";
 const url = import.meta.env.VITE_SUPABASE_URL;
 const key = import.meta.env.VITE_SUPABASE_KEY;
 
-if (!url || !key) {
-  throw new Error(
-    "Missing Supabase env vars. Copy .env.example to .env and fill in VITE_SUPABASE_URL and VITE_SUPABASE_KEY."
-  );
-}
+// Surface config errors as a value rather than a throw — a top-level throw
+// during module load blanks the page before React can mount and show anything.
+export const configError = (!url || !key)
+  ? "Missing Supabase config. VITE_SUPABASE_URL and VITE_SUPABASE_KEY must be set as environment variables in your hosting provider (Cloudflare Pages → Settings → Variables) AND a fresh deploy triggered (Vite inlines env vars at build time)."
+  : null;
 
-export const sb = createClient(url, key, {
-  auth: {
-    persistSession: true,
-    autoRefreshToken: true,
-    detectSessionInUrl: true,
-  },
-  realtime: { params: { eventsPerSecond: 10 } },
-});
+// If config is missing, don't even build a client — App checks `configError`
+// and renders a friendly error screen instead of blank-screening.
+export const sb = configError
+  ? null
+  : createClient(url, key, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+      },
+      realtime: { params: { eventsPerSecond: 10 } },
+    });
 
 // ─── Auth ───────────────────────────────────────────────────────────────────
 export const auth = {
