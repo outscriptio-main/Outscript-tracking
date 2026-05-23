@@ -17,9 +17,56 @@ if (!url || !key) {
 }
 
 export const sb = createClient(url, key, {
-  auth: { persistSession: false },
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: true,
+  },
   realtime: { params: { eventsPerSecond: 10 } },
 });
+
+// ─── Auth ───────────────────────────────────────────────────────────────────
+export const auth = {
+  async signIn(email, password) {
+    const { data, error } = await sb.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+    return data;
+  },
+  async signUp(email, password) {
+    const { data, error } = await sb.auth.signUp({ email, password });
+    if (error) throw error;
+    return data;
+  },
+  /**
+   * Kick off Google OAuth. The browser navigates away to Google → Supabase →
+   * back to this app with the session in the URL hash. The Supabase client's
+   * `detectSessionInUrl` flag picks it up automatically on return.
+   */
+  async signInWithGoogle() {
+    const { data, error } = await sb.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo: window.location.origin,
+        queryParams: { access_type: "offline", prompt: "consent" },
+      },
+    });
+    if (error) throw error;
+    return data;
+  },
+  async signOut() {
+    const { error } = await sb.auth.signOut();
+    if (error) throw error;
+  },
+  async getSession() {
+    const { data } = await sb.auth.getSession();
+    return data.session;
+  },
+  /** Subscribe to auth changes. Returns a subscription with `.unsubscribe()`. */
+  onChange(cb) {
+    const { data } = sb.auth.onAuthStateChange((_event, session) => cb(session));
+    return data.subscription;
+  },
+};
 
 // ─── camelCase ↔ snake_case ────────────────────────────────────────────────
 const toCamel = (s) => s.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
@@ -190,6 +237,103 @@ export const dataLayer = {
   async deleteLead(leadId) {
     const { error } = await sb.from("leads").delete().eq("id", leadId);
     must(error, "deleteLead");
+  },
+
+  // ── Profiles (auth-linked) ───────────────────────────────────────────
+  async loadProfile(userId) {
+    const { data, error } = await sb
+      .from("profiles")
+      .select("*")
+      .eq("id", userId)
+      .maybeSingle();
+    if (error) {
+      // PGRST116 = no row found via maybeSingle — treat as null
+      if (error.code === "PGRST116") return null;
+      must(error, "loadProfile");
+    }
+    return data ? rowToApp(data) : null;
+  },
+  async listProfiles() {
+    const { data, error } = await sb
+      .from("profiles")
+      .select("*")
+      .order("created_at", { ascending: false });
+    must(error, "listProfiles");
+    return (data || []).map(rowToApp);
+  },
+  async updateProfile(id, updates) {
+    // Strip immutable + server-managed fields (email comes from auth.users)
+    const row = appToRow(updates);
+    delete row.id;
+    delete row.email;
+    delete row.created_at;
+    const { data, error } = await sb
+      .from("profiles")
+      .update(row)
+      .eq("id", id)
+      .select()
+      .single();
+    must(error, "updateProfile");
+    return rowToApp(data);
+  },
+
+  // ── Pending invites ───────────────────────────────────────────────────
+  async listInvites() {
+    const { data, error } = await sb
+      .from("pending_invites")
+      .select("*")
+      .order("invited_at", { ascending: false });
+    must(error, "listInvites");
+    return (data || []).map(rowToApp);
+  },
+  async createInvite({ email, isAdmin = false, creatorId = null, setterId = null }) {
+    const row = appToRow({ email: email.trim().toLowerCase(), isAdmin: !!isAdmin, creatorId, setterId });
+    const { data, error } = await sb
+      .from("pending_invites")
+      .upsert(row, { onConflict: "email" })
+      .select()
+      .single();
+    must(error, "createInvite");
+    return rowToApp(data);
+  },
+  /**
+   * Smart assignment: if a profile already exists for this email (user signed up),
+   * update it directly. Otherwise create a pending_invite that auto-applies on
+   * next sign-up. Returns { applied: "profile" | "invite" }.
+   *
+   * Roles are non-exclusive — a user can be any combination of admin / creator / setter.
+   */
+  async assignByEmail({ email, isAdmin = false, creatorId = null, setterId = null }) {
+    const cleanEmail = email.trim().toLowerCase();
+    const { data: existing, error: lookupErr } = await sb
+      .from("profiles")
+      .select("id")
+      .ilike("email", cleanEmail)
+      .maybeSingle();
+    if (lookupErr && lookupErr.code !== "PGRST116") must(lookupErr, "assignByEmail.lookup");
+
+    if (existing) {
+      const { error } = await sb
+        .from("profiles")
+        .update(appToRow({ isAdmin: !!isAdmin, creatorId, setterId }))
+        .eq("id", existing.id);
+      must(error, "assignByEmail.update");
+      return { applied: "profile" };
+    }
+
+    const row = appToRow({ email: cleanEmail, isAdmin: !!isAdmin, creatorId, setterId });
+    const { error } = await sb
+      .from("pending_invites")
+      .upsert(row, { onConflict: "email" });
+    must(error, "assignByEmail.invite");
+    return { applied: "invite" };
+  },
+  async deleteInvite(email) {
+    const { error } = await sb
+      .from("pending_invites")
+      .delete()
+      .eq("email", email.trim().toLowerCase());
+    must(error, "deleteInvite");
   },
 
   // ── Realtime ──────────────────────────────────────────────────────────

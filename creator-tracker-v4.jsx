@@ -1,7 +1,6 @@
 import { useState, useEffect, useMemo, useId } from "react";
-import { dataLayer, payloadToApp } from "./src/supabase";
+import { dataLayer, payloadToApp, auth } from "./src/supabase";
 
-const ADMIN_PASS = "locascale2024";
 const CREATOR_PLATFORMS = ["Instagram", "YouTube", "TikTok", "LinkedIn", "X"];
 const SETTER_PLATFORMS = ["Instagram", "LinkedIn", "School", "X", "Facebook"];
 const PLATFORM_COLORS = {
@@ -298,17 +297,25 @@ function Podium({ items, color = col.accent, valueFmt = fmtNum, onClick }) {
 
 // ─── APP ─────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [view, setView] = useState("home");
   const [creators, setCreators] = useState([]);
   const [setters, setSetters] = useState([]);
   const [videosMap, setVideosMap] = useState({});
   const [eodMap, setEodMap] = useState({});
   const [leadsMap, setLeadsMap] = useState({});
-  const [authed, setAuthed] = useState(false);
-  const [currentId, setCurrentId] = useState(null);
   const [focusId, setFocusId] = useState(null);
+  const [adminView, setAdminView] = useState("main"); // "main" | "creator-detail" | "setter-detail"
   const [ready, setReady] = useState(false);
   const [loadError, setLoadError] = useState(null);
+
+  // Auth state
+  const [session, setSession] = useState(null);
+  const [sessionReady, setSessionReady] = useState(false);
+  const [profile, setProfile] = useState(null);
+  const [profileLoading, setProfileLoading] = useState(false);
+
+  // Admin notifications + profiles version (for live-updating the Users tab)
+  const [notifications, setNotifications] = useState([]);
+  const [profilesVersion, setProfilesVersion] = useState(0);
 
   const load = async () => {
     const { creators: c, setters: s, videosMap: vm, eodMap: em, leadsMap: lm } = await dataLayer.loadAll();
@@ -319,11 +326,31 @@ export default function App() {
     setLeadsMap(lm);
   };
 
+  // Establish session
   useEffect(() => {
+    auth.getSession().then(s => { setSession(s); setSessionReady(true); });
+    const sub = auth.onChange(s => setSession(s));
+    return () => sub.unsubscribe();
+  }, []);
+
+  // Load profile whenever the session user changes
+  useEffect(() => {
+    if (!session?.user) { setProfile(null); return; }
+    setProfileLoading(true);
+    dataLayer.loadProfile(session.user.id)
+      .then(p => setProfile(p))
+      .catch(e => { console.error(e); setProfile(null); })
+      .finally(() => setProfileLoading(false));
+  }, [session?.user?.id]);
+
+  // Load shared data once we have an authenticated session
+  useEffect(() => {
+    if (!session) { setReady(false); setLoadError(null); return; }
+    setLoadError(null);
     load()
       .then(() => setReady(true))
       .catch((e) => { setLoadError(e.message || String(e)); setReady(true); });
-  }, []);
+  }, [session?.user?.id]);
 
   // Realtime: keep state in sync when any other client mutates a row.
   useEffect(() => {
@@ -368,10 +395,29 @@ export default function App() {
           if (ev.type === "DELETE") return { ...p, [id]: cur.filter(l => l.id !== ev.old.id) };
           return p;
         });
+      } else if (table === "profiles") {
+        // Bump version so the Admin Users tab refetches in real time
+        setProfilesVersion(v => v + 1);
+        // If the current user is an admin and someone ELSE just signed up, raise a toast
+        if (ev.type === "INSERT" && profile?.isAdmin && ev.new?.id && ev.new.id !== profile.id) {
+          setNotifications(prev => {
+            if (prev.some(n => n.id === ev.new.id)) return prev; // dedupe
+            return [...prev, {
+              id: ev.new.id,
+              kind: "new_signup",
+              email: ev.new.email,
+              name: ev.new.name,
+              ts: Date.now(),
+            }];
+          });
+        }
       }
     });
     return () => sub.unsubscribe();
-  }, [ready, loadError]);
+  }, [ready, loadError, profile?.isAdmin, profile?.id]);
+
+  const dismissNotification = (id) => setNotifications(prev => prev.filter(n => n.id !== id));
+  const clearAllNotifications = () => setNotifications([]);
 
   // Small uniform error wrapper so a failed save surfaces something instead of being silent.
   const wrap = async (fn) => {
@@ -379,11 +425,14 @@ export default function App() {
     catch (e) { console.error(e); alert(e.message || String(e)); }
   };
 
-  const addCreator = async (name) => wrap(async () => {
-    const nc = await dataLayer.addCreator(name);
-    setCreators(prev => prev.some(x => x.id === nc.id) ? prev : [...prev, nc]);
-    setVideosMap(p => ({ ...p, [nc.id]: p[nc.id] || [] }));
-  });
+  const addCreator = async (name) => {
+    try {
+      const nc = await dataLayer.addCreator(name);
+      setCreators(prev => prev.some(x => x.id === nc.id) ? prev : [...prev, nc]);
+      setVideosMap(p => ({ ...p, [nc.id]: p[nc.id] || [] }));
+      return nc;
+    } catch (e) { console.error(e); alert(e.message || String(e)); throw e; }
+  };
   const removeCreator = async (id) => wrap(async () => {
     await dataLayer.removeCreator(id);
     setCreators(prev => prev.filter(c => c.id !== id));
@@ -403,12 +452,15 @@ export default function App() {
     setVideosMap(p => ({ ...p, [creatorId]: (p[creatorId] || []).filter(v => v.id !== videoId) }));
   });
 
-  const addSetter = async (name) => wrap(async () => {
-    const ns = await dataLayer.addSetter(name);
-    setSetters(prev => prev.some(x => x.id === ns.id) ? prev : [...prev, ns]);
-    setEodMap(p => ({ ...p, [ns.id]: p[ns.id] || [] }));
-    setLeadsMap(p => ({ ...p, [ns.id]: p[ns.id] || [] }));
-  });
+  const addSetter = async (name) => {
+    try {
+      const ns = await dataLayer.addSetter(name);
+      setSetters(prev => prev.some(x => x.id === ns.id) ? prev : [...prev, ns]);
+      setEodMap(p => ({ ...p, [ns.id]: p[ns.id] || [] }));
+      setLeadsMap(p => ({ ...p, [ns.id]: p[ns.id] || [] }));
+      return ns;
+    } catch (e) { console.error(e); alert(e.message || String(e)); throw e; }
+  };
   const removeSetter = async (id) => wrap(async () => {
     await dataLayer.removeSetter(id);
     setSetters(prev => prev.filter(s => s.id !== id));
@@ -436,12 +488,39 @@ export default function App() {
     setLeadsMap(p => ({ ...p, [setterId]: (p[setterId] || []).filter(l => l.id !== leadId) }));
   });
 
-  const currentCreator = creators.find(c => c.id === currentId);
-  const currentSetter = setters.find(s => s.id === currentId);
   const focusCreator = creators.find(c => c.id === focusId);
   const focusSetter = setters.find(s => s.id === focusId);
+  const myCreator = profile?.creatorId ? creators.find(c => c.id === profile.creatorId) : null;
+  const mySetter = profile?.setterId ? setters.find(s => s.id === profile.setterId) : null;
+  const [activeRole, setActiveRole] = useState(null); // "creator" | "setter" | "admin" — for users with multiple
 
-  if (!ready) return <div style={{ ...S.page, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: mono, color: col.muted, fontSize: 12 }}>Loading...</div>;
+  // Auto-pick a default active role based on what the user has
+  useEffect(() => {
+    if (!profile) { setActiveRole(null); return; }
+    if (profile.isAdmin) { setActiveRole("admin"); return; }
+    if (myCreator) { setActiveRole("creator"); return; }
+    if (mySetter) { setActiveRole("setter"); return; }
+    setActiveRole(null);
+  }, [profile?.id, profile?.isAdmin, myCreator?.id, mySetter?.id]);
+
+  // Roles the user has access to (for the switcher in dashboard header)
+  const availableRoles = [];
+  if (profile?.isAdmin) availableRoles.push({ key: "admin", label: "Admin", color: col.warn });
+  if (myCreator) availableRoles.push({ key: "creator", label: "Creator", color: col.accent });
+  if (mySetter) availableRoles.push({ key: "setter", label: "Setter", color: col.blue });
+
+  const handleSignOut = async () => {
+    try { await auth.signOut(); } catch (e) { console.error(e); }
+    setProfile(null);
+    setFocusId(null);
+  };
+
+  // Loading gates ──────────────────────────────────────────────────────────
+  if (!sessionReady) return <div style={{ ...S.page, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: mono, color: col.muted, fontSize: 12 }}>Loading…</div>;
+
+  // Not signed in
+  if (!session) return <SignInPage />;
+
   if (loadError) return (
     <div style={{ ...S.page, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
       <div style={{ maxWidth: 480, textAlign: "center" }}>
@@ -449,10 +528,18 @@ export default function App() {
         <h2 style={{ fontSize: 22, fontWeight: 800, marginBottom: 10 }}>Couldn't reach Supabase</h2>
         <p style={{ color: col.muted2, fontSize: 14, marginBottom: 18, lineHeight: 1.5 }}>{loadError}</p>
         <p style={{ color: col.muted, fontSize: 12, marginBottom: 18, lineHeight: 1.5 }}>Check that <code style={{ background: col.surf2, padding: "2px 6px", borderRadius: 4 }}>.env</code> has <code style={{ background: col.surf2, padding: "2px 6px", borderRadius: 4 }}>VITE_SUPABASE_URL</code> + <code style={{ background: col.surf2, padding: "2px 6px", borderRadius: 4 }}>VITE_SUPABASE_KEY</code> set, and that <code style={{ background: col.surf2, padding: "2px 6px", borderRadius: 4 }}>supabase/schema.sql</code> has been run.</p>
-        <button style={btnA} onClick={() => { setLoadError(null); setReady(false); load().then(() => setReady(true)).catch(e => { setLoadError(e.message); setReady(true); }); }}>Retry</button>
+        <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
+          <button style={btnA} onClick={() => { setLoadError(null); setReady(false); load().then(() => setReady(true)).catch(e => { setLoadError(e.message); setReady(true); }); }}>Retry</button>
+          <button style={btnG} onClick={handleSignOut}>Sign out</button>
+        </div>
       </div>
     </div>
   );
+
+  if (!ready || profileLoading) return <div style={{ ...S.page, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: mono, color: col.muted, fontSize: 12 }}>Loading…</div>;
+
+  // Signed in, nothing assigned
+  if (availableRoles.length === 0) return <UnassignedPage email={session.user.email} onSignOut={handleSignOut} />;
 
   return (
     <>
@@ -546,97 +633,309 @@ export default function App() {
           .stat-box { min-width: 100% !important; }
         }
       `}</style>
-      {view === "home" && <Home goto={setView} />}
-      {view === "creator-login" && <RoleLogin role="creator" list={creators} onPick={(id) => { setCurrentId(id); setView("creator-dash"); }} onBack={() => setView("home")} />}
-      {view === "creator-dash" && currentCreator && <CreatorDash creator={currentCreator} videos={videosMap[currentCreator.id] || []} onSave={(v) => saveVideo(currentCreator.id, v)} onDelete={(id) => deleteVideo(currentCreator.id, id)} onLogout={() => { setCurrentId(null); setView("home"); }} />}
-      {view === "setter-login" && <RoleLogin role="setter" list={setters} onPick={(id) => { setCurrentId(id); setView("setter-dash"); }} onBack={() => setView("home")} />}
-      {view === "setter-dash" && currentSetter && <SetterDash setter={currentSetter} eods={eodMap[currentSetter.id] || []} leads={leadsMap[currentSetter.id] || []} onSave={(e) => saveEOD(currentSetter.id, e)} onSaveLead={(l) => saveLead(currentSetter.id, l)} onDeleteLead={(id) => deleteLead(currentSetter.id, id)} onLogout={() => { setCurrentId(null); setView("home"); }} />}
-      {view === "admin-login" && <AdminLogin onSuccess={() => { setAuthed(true); setView("admin"); }} onBack={() => setView("home")} />}
-      {view === "admin" && <AdminDash creators={creators} setters={setters} videosMap={videosMap} eodMap={eodMap}
-        onAddCreator={addCreator} onRemoveCreator={removeCreator}
-        onAddSetter={addSetter} onRemoveSetter={removeSetter}
-        onSelectCreator={(id) => { setFocusId(id); setView("admin-creator-detail"); }}
-        onSelectSetter={(id) => { setFocusId(id); setView("admin-setter-detail"); }}
-        onBack={() => setView("home")} />}
-      {view === "admin-creator-detail" && focusCreator && <AdminCreatorDetail creator={focusCreator} videos={videosMap[focusCreator.id] || []} onBack={() => setView("admin")} />}
-      {view === "admin-setter-detail" && focusSetter && <AdminSetterDetail setter={focusSetter} eods={eodMap[focusSetter.id] || []} leads={leadsMap[focusSetter.id] || []} onBack={() => setView("admin")} />}
+      {activeRole === "creator" && myCreator && (
+        <CreatorDash creator={myCreator}
+          videos={videosMap[myCreator.id] || []}
+          onSave={(v) => saveVideo(myCreator.id, v)}
+          onDelete={(id) => deleteVideo(myCreator.id, id)}
+          onLogout={handleSignOut}
+          availableRoles={availableRoles}
+          activeRole={activeRole}
+          onSwitchRole={setActiveRole} />
+      )}
+      {activeRole === "setter" && mySetter && (
+        <SetterDash setter={mySetter}
+          eods={eodMap[mySetter.id] || []}
+          leads={leadsMap[mySetter.id] || []}
+          onSave={(e) => saveEOD(mySetter.id, e)}
+          onSaveLead={(l) => saveLead(mySetter.id, l)}
+          onDeleteLead={(id) => deleteLead(mySetter.id, id)}
+          onLogout={handleSignOut}
+          availableRoles={availableRoles}
+          activeRole={activeRole}
+          onSwitchRole={setActiveRole} />
+      )}
+      {activeRole === "admin" && adminView === "main" && (
+        <AdminDash creators={creators} setters={setters} videosMap={videosMap} eodMap={eodMap}
+          onAddCreator={addCreator} onRemoveCreator={removeCreator}
+          onAddSetter={addSetter} onRemoveSetter={removeSetter}
+          onSelectCreator={(id) => { setFocusId(id); setAdminView("creator-detail"); }}
+          onSelectSetter={(id) => { setFocusId(id); setAdminView("setter-detail"); }}
+          onLogout={handleSignOut}
+          availableRoles={availableRoles}
+          activeRole={activeRole}
+          onSwitchRole={setActiveRole}
+          profilesVersion={profilesVersion}
+          initialTab="users" />
+      )}
+
+      {profile?.isAdmin && (
+        <NotificationStack notifications={notifications}
+          onDismiss={dismissNotification}
+          onClearAll={clearAllNotifications}
+          onJumpToUsers={() => { setActiveRole("admin"); setAdminView("main"); }} />
+      )}
+      {activeRole === "admin" && adminView === "creator-detail" && focusCreator && (
+        <AdminCreatorDetail creator={focusCreator} videos={videosMap[focusCreator.id] || []} onBack={() => setAdminView("main")} />
+      )}
+      {activeRole === "admin" && adminView === "setter-detail" && focusSetter && (
+        <AdminSetterDetail setter={focusSetter} eods={eodMap[focusSetter.id] || []} leads={leadsMap[focusSetter.id] || []} onBack={() => setAdminView("main")} />
+      )}
     </>
   );
 }
 
-// ─── HOME ────────────────────────────────────────────────────────────────────
-function Home({ goto }) {
-  const tiles = [
-    { id: "creator-login", role: "Creator", sub: "Reposter ops", desc: "Log videos, track views, see what's working.", color: col.accent, glow: col.glow, icon: "▶" },
-    { id: "setter-login", role: "Setter", sub: "Outreach ops", desc: "Submit EODs, manage your lead pipeline.", color: col.blue, glow: col.glowBlue, icon: "✦" },
-    { id: "admin-login", role: "Admin", sub: "Team console", desc: "Roster, leaderboards, team metrics.", color: col.text, glow: "rgba(255,255,255,0.04)", icon: "◆" },
-  ];
+// ─── SIGN IN PAGE ────────────────────────────────────────────────────────────
+function GoogleIcon({ size = 18 }) {
   return (
-    <div style={{ ...S.page, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh", padding: "40px 20px" }}>
-      <div style={{ textAlign: "center", marginBottom: 56 }} className="fade">
-        <div style={{ fontFamily: mono, fontSize: 11, letterSpacing: "0.3em", color: col.muted2, textTransform: "uppercase", marginBottom: 18, display: "inline-flex", alignItems: "center", gap: 10 }}>
-          <span style={{ width: 8, height: 8, borderRadius: "50%", background: col.accent, boxShadow: `0 0 12px ${col.accent}` }} />
-          LocaScale Operations
+    <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true">
+      <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+      <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+      <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+      <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+    </svg>
+  );
+}
+
+function SignInPage() {
+  const [mode, setMode] = useState("signin"); // "signin" | "signup"
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [info, setInfo] = useState(null);
+
+  const handleGoogle = async () => {
+    setBusy(true); setErr(null); setInfo(null);
+    try {
+      await auth.signInWithGoogle();
+      // The browser will navigate away to Google; if it returns we're signed in.
+    } catch (e) {
+      setErr(e.message || String(e));
+      setBusy(false);
+    }
+  };
+
+  const submit = async (e) => {
+    e?.preventDefault();
+    setErr(null); setInfo(null);
+    if (!email || !password) { setErr("Email and password required."); return; }
+    setBusy(true);
+    try {
+      if (mode === "signin") {
+        await auth.signIn(email, password);
+        // The App's auth listener picks it up — no nav needed
+      } else {
+        const { user, session } = await auth.signUp(email, password);
+        if (!session) {
+          setInfo("Account created. Check your inbox to confirm your email, then come back and sign in.");
+          setMode("signin");
+        }
+      }
+    } catch (e) {
+      setErr(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ ...S.page, display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", padding: "40px 20px" }}>
+      <div style={{ width: "100%", maxWidth: 420 }} className="fade">
+        <div style={{ textAlign: "center", marginBottom: 36 }}>
+          <div style={{ fontFamily: mono, fontSize: 11, letterSpacing: "0.3em", color: col.muted2, textTransform: "uppercase", marginBottom: 16, display: "inline-flex", alignItems: "center", gap: 10 }}>
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: col.accent, boxShadow: `0 0 12px ${col.accent}` }} />
+            LocaScale Operations
+          </div>
+          <h1 style={{ fontSize: 42, fontWeight: 800, letterSpacing: "-0.035em", marginBottom: 10, lineHeight: 1 }}>
+            <span style={{ background: `linear-gradient(135deg, ${col.accent}, ${col.blue})`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text" }}>Daily Tracker</span>
+          </h1>
+          <p style={{ color: col.muted2, fontSize: 14 }}>{mode === "signin" ? "Sign in to continue." : "Create an account to get started."}</p>
         </div>
-        <h1 style={{ fontSize: 52, fontWeight: 800, letterSpacing: "-0.035em", marginBottom: 14, lineHeight: 1 }}>
-          Daily <span style={{ background: `linear-gradient(135deg, ${col.accent}, ${col.blue})`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text" }}>Tracker</span>
-        </h1>
-        <p style={{ color: col.muted2, fontSize: 15, maxWidth: 480, margin: "0 auto" }}>One source of truth for the team — creators, setters, and the admins watching the scoreboard.</p>
-      </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 16, width: "100%", maxWidth: 880 }} className="fade">
-        {tiles.map(t => (
-          <button key={t.id} onClick={() => goto(t.id)} style={{
-            background: col.surf, border: `1px solid ${col.border}`, borderRadius: 14, padding: "28px 24px",
-            cursor: "pointer", textAlign: "left", fontFamily: font, color: col.text,
-            position: "relative", overflow: "hidden",
+
+        <form onSubmit={submit} style={{ ...S.card, padding: "28px 26px" }}>
+          <button type="button" onClick={handleGoogle} disabled={busy} style={{
+            width: "100%",
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
+            padding: "12px 14px",
+            background: col.surf2, color: col.text,
+            border: `1px solid ${col.border}`, borderRadius: 6,
+            cursor: "pointer", fontFamily: font, fontSize: 14, fontWeight: 600,
+            marginBottom: 18,
           }}
-            onMouseEnter={e => { e.currentTarget.style.borderColor = t.color; e.currentTarget.style.boxShadow = `0 12px 40px ${t.glow}`; e.currentTarget.style.transform = "translateY(-2px)"; }}
-            onMouseLeave={e => { e.currentTarget.style.borderColor = col.border; e.currentTarget.style.boxShadow = "none"; e.currentTarget.style.transform = "translateY(0)"; }}
+            onMouseEnter={e => { if (!busy) e.currentTarget.style.borderColor = col.borderHi; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = col.border; }}
           >
-            <div style={{ position: "absolute", top: -30, right: -30, width: 120, height: 120, borderRadius: "50%", background: t.color, opacity: 0.06, filter: "blur(20px)" }} />
-            <div style={{ fontSize: 24, color: t.color, marginBottom: 16 }}>{t.icon}</div>
-            <div style={{ fontFamily: mono, fontSize: 10, letterSpacing: "0.15em", color: col.muted, textTransform: "uppercase", marginBottom: 6 }}>{t.sub}</div>
-            <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: "-0.02em", marginBottom: 8 }}>{t.role}</div>
-            <div style={{ fontSize: 13, color: col.muted2, lineHeight: 1.5, marginBottom: 18 }}>{t.desc}</div>
-            <div style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: t.color, letterSpacing: "0.05em", textTransform: "uppercase" }}>
-              Enter <span style={{ fontSize: 14 }}>→</span>
-            </div>
+            <GoogleIcon />
+            Continue with Google
           </button>
-        ))}
+
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
+            <div style={{ flex: 1, height: 1, background: col.border }} />
+            <span style={{ fontFamily: mono, fontSize: 9, color: col.muted, letterSpacing: "0.2em", textTransform: "uppercase" }}>or email</span>
+            <div style={{ flex: 1, height: 1, background: col.border }} />
+          </div>
+
+          <div style={{ display: "flex", gap: 4, padding: 3, background: col.surf2, borderRadius: 8, marginBottom: 20 }}>
+            {[
+              { id: "signin", label: "Sign in" },
+              { id: "signup", label: "Sign up" },
+            ].map(t => (
+              <button key={t.id} type="button" onClick={() => { setMode(t.id); setErr(null); setInfo(null); }} style={{
+                flex: 1, padding: "10px 14px", borderRadius: 6,
+                border: "none", cursor: "pointer", fontFamily: font, fontSize: 13, fontWeight: 700,
+                background: mode === t.id ? col.surf : "transparent",
+                color: mode === t.id ? col.text : col.muted2,
+                transition: "background 0.15s, color 0.15s",
+              }}>{t.label}</button>
+            ))}
+          </div>
+
+          <div style={{ marginBottom: 14 }}>
+            <label style={S.label}>Email</label>
+            <input autoFocus type="email" autoComplete="email" style={S.input} placeholder="you@example.com" value={email} onChange={e => setEmail(e.target.value)} />
+          </div>
+          <div style={{ marginBottom: 18 }}>
+            <label style={S.label}>Password</label>
+            <input type="password" autoComplete={mode === "signin" ? "current-password" : "new-password"} style={S.input} placeholder={mode === "signup" ? "At least 6 characters" : "Your password"} value={password} onChange={e => setPassword(e.target.value)} />
+          </div>
+
+          {err && (
+            <div style={{ background: `${col.danger}1a`, border: `1px solid ${col.danger}55`, color: col.danger, padding: "10px 12px", borderRadius: 6, fontSize: 13, marginBottom: 14 }}>{err}</div>
+          )}
+          {info && (
+            <div style={{ background: `${col.success}1a`, border: `1px solid ${col.success}55`, color: col.success, padding: "10px 12px", borderRadius: 6, fontSize: 13, marginBottom: 14 }}>{info}</div>
+          )}
+
+          <button type="submit" style={{ ...btnA, width: "100%", padding: "14px" }} disabled={busy || !email || !password}>
+            {busy ? (mode === "signin" ? "Signing in…" : "Creating account…") : (mode === "signin" ? "Sign in" : "Create account")}
+          </button>
+
+          <p style={{ marginTop: 18, fontSize: 12, color: col.muted, textAlign: "center", lineHeight: 1.5 }}>
+            {mode === "signin"
+              ? <>Don't have an account? <button type="button" onClick={() => { setMode("signup"); setErr(null); setInfo(null); }} style={{ background: "none", border: "none", color: col.accent, cursor: "pointer", fontFamily: font, fontSize: 12, fontWeight: 700, padding: 0 }}>Sign up</button></>
+              : <>Already have an account? <button type="button" onClick={() => { setMode("signin"); setErr(null); setInfo(null); }} style={{ background: "none", border: "none", color: col.accent, cursor: "pointer", fontFamily: font, fontSize: 12, fontWeight: 700, padding: 0 }}>Sign in</button></>
+            }
+          </p>
+        </form>
+
+        <div style={{ marginTop: 24, textAlign: "center", fontFamily: mono, fontSize: 10, color: col.muted, letterSpacing: "0.15em", textTransform: "uppercase" }}>tracking.outscript.io</div>
       </div>
-      <div style={{ marginTop: 56, fontFamily: mono, fontSize: 10, color: col.muted, letterSpacing: "0.15em", textTransform: "uppercase" }}>locascale.outscript.io</div>
     </div>
   );
 }
 
-// ─── ROLE LOGIN (shared) ────────────────────────────────────────────────────
-function RoleLogin({ role, list, onPick, onBack }) {
-  const [id, setId] = useState("");
-  const label = role === "creator" ? "Creator" : "Setter";
+// ─── NOTIFICATION STACK ──────────────────────────────────────────────────────
+function NotificationStack({ notifications, onDismiss, onClearAll, onJumpToUsers }) {
+  if (!notifications || notifications.length === 0) return null;
   return (
-    <div style={S.page}>
-      <div style={S.inner}>
-        <button style={{ ...btnG, padding: "8px 16px", fontSize: 12, marginBottom: 36 }} onClick={onBack}>← Back</button>
-        <h2 style={{ fontSize: 24, fontWeight: 800, letterSpacing: "-0.02em", marginBottom: 6 }}>{label} Sign In</h2>
-        <p style={{ color: col.muted, fontSize: 14, marginBottom: 28 }}>Select your name to access your dashboard.</p>
-        <div style={S.card}>
-          <label style={S.label}>Your Name</label>
-          {list.length === 0
-            ? <p style={{ color: col.muted, fontSize: 13 }}>No {label.toLowerCase()}s yet. Ask your admin to add you.</p>
-            : <select style={S.select} value={id} onChange={e => setId(e.target.value)}>
-                <option value="">Select your name...</option>
-                {list.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-              </select>
-          }
+    <div style={{
+      position: "fixed", bottom: 20, right: 20, zIndex: 1000,
+      display: "flex", flexDirection: "column", gap: 10,
+      maxWidth: 360, width: "calc(100vw - 40px)",
+    }}>
+      {notifications.length > 1 && (
+        <button onClick={onClearAll} style={{
+          alignSelf: "flex-end",
+          background: col.surf2, color: col.muted2,
+          border: `1px solid ${col.border}`, borderRadius: 6,
+          padding: "6px 12px", fontSize: 11, fontWeight: 600, cursor: "pointer",
+          fontFamily: font,
+        }}>Dismiss all ({notifications.length})</button>
+      )}
+      {notifications.map(n => (
+        <NotificationToast key={n.id} notification={n}
+          onDismiss={() => onDismiss(n.id)}
+          onAction={onJumpToUsers} />
+      ))}
+    </div>
+  );
+}
+
+function NotificationToast({ notification, onDismiss, onAction }) {
+  // Auto-dismiss after 20 seconds (admin still sees count via toast stack if multiple)
+  useEffect(() => {
+    const t = setTimeout(() => onDismiss(), 20000);
+    return () => clearTimeout(t);
+  }, []);
+
+  const display = notification.name || notification.email?.split("@")[0] || "New user";
+
+  return (
+    <div className="fade" style={{
+      background: col.surf,
+      border: `1px solid ${col.accent}66`,
+      borderRadius: 10,
+      padding: "14px 16px",
+      boxShadow: `0 12px 40px ${col.glow}, 0 4px 12px rgba(0,0,0,0.4)`,
+      display: "flex",
+      gap: 12,
+      alignItems: "flex-start",
+      position: "relative",
+      overflow: "hidden",
+    }}>
+      <div style={{
+        position: "absolute", left: 0, top: 0, bottom: 0, width: 3,
+        background: `linear-gradient(180deg, ${col.accent}, ${col.accent}33)`,
+      }} />
+      <div style={{ flexShrink: 0, marginTop: 2, fontSize: 18 }}>✨</div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontFamily: mono, fontSize: 9, color: col.accent, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 700, marginBottom: 4 }}>New sign-up</div>
+        <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{display}</div>
+        <div style={{ fontSize: 11, color: col.muted, fontFamily: mono, marginBottom: 10, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{notification.email}</div>
+        <button onClick={() => { onAction?.(); onDismiss(); }} style={{
+          background: col.accent, color: "#000", border: "none", borderRadius: 5,
+          padding: "6px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer",
+          fontFamily: font, letterSpacing: "0.05em", textTransform: "uppercase",
+        }}>Assign now →</button>
+      </div>
+      <button onClick={onDismiss} style={{
+        background: "transparent", color: col.muted2, border: "none",
+        cursor: "pointer", fontSize: 16, padding: 4, lineHeight: 1, fontFamily: font,
+      }}>✕</button>
+    </div>
+  );
+}
+
+// ─── ROLE SWITCHER (for users with multiple roles) ──────────────────────────
+function RoleSwitcher({ availableRoles, activeRole, onSwitchRole }) {
+  if (!availableRoles || availableRoles.length < 2) return null;
+  return (
+    <div style={{ display: "inline-flex", gap: 2, padding: 3, background: col.surf2, borderRadius: 8, border: `1px solid ${col.border}` }}>
+      {availableRoles.map(r => (
+        <button key={r.key} onClick={() => onSwitchRole(r.key)} style={{
+          padding: "7px 14px", borderRadius: 5, cursor: "pointer",
+          fontFamily: font, fontSize: 11, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase",
+          background: activeRole === r.key ? r.color + "22" : "transparent",
+          color: activeRole === r.key ? r.color : col.muted2,
+          border: activeRole === r.key ? `1px solid ${r.color}55` : "1px solid transparent",
+          transition: "background 0.15s, color 0.15s",
+        }}>{r.label}</button>
+      ))}
+    </div>
+  );
+}
+
+// ─── UNASSIGNED PAGE ────────────────────────────────────────────────────────
+function UnassignedPage({ email, onSignOut, reason }) {
+  return (
+    <div style={{ ...S.page, display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", padding: "40px 20px" }}>
+      <div style={{ width: "100%", maxWidth: 480, textAlign: "center" }} className="fade">
+        <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 64, height: 64, borderRadius: "50%", background: `${col.warn}22`, border: `1px solid ${col.warn}55`, marginBottom: 22 }}>
+          <span style={{ fontSize: 28 }}>⏳</span>
         </div>
-        {id && <button style={{ ...(role === "creator" ? btnA : btnB), marginTop: 8 }} onClick={() => onPick(id)}>Enter Dashboard →</button>}
+        <div style={{ fontFamily: mono, fontSize: 10, letterSpacing: "0.25em", color: col.warn, textTransform: "uppercase", marginBottom: 12 }}>Awaiting Assignment</div>
+        <h1 style={{ fontSize: 28, fontWeight: 800, letterSpacing: "-0.02em", marginBottom: 14, lineHeight: 1.2 }}>You're signed in, but not yet assigned a role.</h1>
+        <p style={{ color: col.muted2, fontSize: 15, marginBottom: 8, lineHeight: 1.5 }}>{reason || "Please contact your admin to get linked to your creator or setter profile."}</p>
+        <p style={{ color: col.muted, fontSize: 13, marginBottom: 28, fontFamily: mono }}>{email}</p>
+        <button style={btnG} onClick={onSignOut}>Sign out</button>
       </div>
     </div>
   );
 }
 
 // ─── CREATOR DASHBOARD ──────────────────────────────────────────────────────
-function CreatorDash({ creator, videos, onSave, onDelete, onLogout }) {
+function CreatorDash({ creator, videos, onSave, onDelete, onLogout, availableRoles, activeRole, onSwitchRole }) {
   const [tab, setTab] = useState("overview");
   const [editing, setEditing] = useState(null);
   const [adding, setAdding] = useState(false);
@@ -663,7 +962,10 @@ function CreatorDash({ creator, videos, onSave, onDelete, onLogout }) {
             <div style={{ fontFamily: mono, fontSize: 10, letterSpacing: "0.2em", color: col.muted, textTransform: "uppercase", marginBottom: 8 }}>Creator Dashboard</div>
             <h1 style={{ fontSize: 26, fontWeight: 800, letterSpacing: "-0.02em" }}>{creator.name}</h1>
           </div>
-          <button style={{ ...btnG, padding: "8px 16px", fontSize: 12 }} onClick={onLogout}>Logout</button>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <RoleSwitcher availableRoles={availableRoles} activeRole={activeRole} onSwitchRole={onSwitchRole} />
+            <button style={{ ...btnG, padding: "8px 16px", fontSize: 12 }} onClick={onLogout}>Sign out</button>
+          </div>
         </div>
 
         <div className="tabs" style={{ display: "flex", borderBottom: `1px solid ${col.border}`, marginBottom: 24, gap: 4, overflowX: "auto" }}>
@@ -837,7 +1139,7 @@ function VideoForm({ video, onSave, onCancel, onDelete }) {
 }
 
 // ─── SETTER DASHBOARD ────────────────────────────────────────────────────────
-function SetterDash({ setter, eods, leads, onSave, onSaveLead, onDeleteLead, onLogout }) {
+function SetterDash({ setter, eods, leads, onSave, onSaveLead, onDeleteLead, onLogout, availableRoles, activeRole, onSwitchRole }) {
   const [tab, setTab] = useState("overview");
   const [submitting, setSubmitting] = useState(false);
 
@@ -876,7 +1178,10 @@ function SetterDash({ setter, eods, leads, onSave, onSaveLead, onDeleteLead, onL
             <div style={{ fontFamily: mono, fontSize: 10, letterSpacing: "0.2em", color: col.blue, textTransform: "uppercase", marginBottom: 8 }}>Setter Dashboard</div>
             <h1 style={{ fontSize: 26, fontWeight: 800, letterSpacing: "-0.02em" }}>{setter.name}</h1>
           </div>
-          <button style={{ ...btnG, padding: "8px 16px", fontSize: 12 }} onClick={onLogout}>Logout</button>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <RoleSwitcher availableRoles={availableRoles} activeRole={activeRole} onSwitchRole={onSwitchRole} />
+            <button style={{ ...btnG, padding: "8px 16px", fontSize: 12 }} onClick={onLogout}>Sign out</button>
+          </div>
         </div>
 
         <div className="tabs" style={{ display: "flex", borderBottom: `1px solid ${col.border}`, marginBottom: 24, gap: 4, overflowX: "auto" }}>
@@ -1280,36 +1585,9 @@ function SetterEODCard({ eod }) {
   );
 }
 
-// ─── ADMIN LOGIN ─────────────────────────────────────────────────────────────
-function AdminLogin({ onSuccess, onBack }) {
-  const [pass, setPass] = useState("");
-  const [err, setErr] = useState(false);
-  const check = () => {
-    if (pass === ADMIN_PASS) onSuccess();
-    else { setErr(true); setPass(""); setTimeout(() => setErr(false), 2000); }
-  };
-  return (
-    <div style={{ ...S.page, display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <div style={{ width: "100%", maxWidth: 360, padding: "0 20px" }}>
-        <button style={{ ...btnG, padding: "8px 16px", fontSize: 12, marginBottom: 36 }} onClick={onBack}>← Back</button>
-        <h2 style={{ fontSize: 24, fontWeight: 800, marginBottom: 24 }}>Admin Access</h2>
-        <div style={{ marginBottom: 16 }}>
-          <label style={S.label}>Password</label>
-          <input type="password" autoFocus
-            style={{ ...S.input, borderColor: err ? col.danger : col.border }}
-            value={pass} onChange={e => setPass(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && check()} placeholder="Enter password" />
-          {err && <div style={{ color: col.danger, fontSize: 12, marginTop: 8 }}>Incorrect password</div>}
-        </div>
-        <button style={btnA} onClick={check}>Enter →</button>
-      </div>
-    </div>
-  );
-}
-
 // ─── ADMIN DASHBOARD ─────────────────────────────────────────────────────────
-function AdminDash({ creators, setters, videosMap, eodMap, onAddCreator, onRemoveCreator, onAddSetter, onRemoveSetter, onSelectCreator, onSelectSetter, onBack }) {
-  const [tab, setTab] = useState("creators");
+function AdminDash({ creators, setters, videosMap, eodMap, onAddCreator, onRemoveCreator, onAddSetter, onRemoveSetter, onSelectCreator, onSelectSetter, onLogout, availableRoles, activeRole, onSwitchRole, profilesVersion = 0, initialTab = "users" }) {
+  const [tab, setTab] = useState(initialTab);
 
   return (
     <div style={S.page}>
@@ -1319,13 +1597,17 @@ function AdminDash({ creators, setters, videosMap, eodMap, onAddCreator, onRemov
             <div style={{ fontFamily: mono, fontSize: 10, letterSpacing: "0.2em", color: col.muted, textTransform: "uppercase", marginBottom: 8 }}>Admin · Operations</div>
             <h1 style={{ fontSize: 26, fontWeight: 800, letterSpacing: "-0.02em" }}>Dashboard</h1>
           </div>
-          <button style={{ ...btnG, padding: "8px 16px", fontSize: 12 }} onClick={onBack}>← Home</button>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <RoleSwitcher availableRoles={availableRoles} activeRole={activeRole} onSwitchRole={onSwitchRole} />
+            <button style={{ ...btnG, padding: "8px 16px", fontSize: 12 }} onClick={onLogout}>Sign out</button>
+          </div>
         </div>
 
         <div className="tabs" style={{ display: "flex", borderBottom: `1px solid ${col.border}`, marginBottom: 24, gap: 4, overflowX: "auto" }}>
           {[
             { id: "creators", label: `Creators (${creators.length})`, color: col.accent },
             { id: "setters", label: `Setters (${setters.length})`, color: col.blue },
+            { id: "users", label: "Users", color: col.warn },
           ].map(t => (
             <button key={t.id} onClick={() => setTab(t.id)} style={{
               background: "none", border: "none", color: tab === t.id ? t.color : col.muted,
@@ -1337,15 +1619,387 @@ function AdminDash({ creators, setters, videosMap, eodMap, onAddCreator, onRemov
 
         {tab === "creators" && <AdminCreatorsView creators={creators} videosMap={videosMap} onAdd={onAddCreator} onRemove={onRemoveCreator} onSelect={onSelectCreator} />}
         {tab === "setters" && <AdminSettersView setters={setters} eodMap={eodMap} onAdd={onAddSetter} onRemove={onRemoveSetter} onSelect={onSelectSetter} />}
+        {tab === "users" && <AdminUsersView creators={creators} setters={setters} onAddCreator={onAddCreator} onAddSetter={onAddSetter} externalVersion={profilesVersion} />}
       </div>
+    </div>
+  );
+}
+
+// ─── ADMIN USERS VIEW ────────────────────────────────────────────────────────
+function AdminUsersView({ creators, setters, onAddCreator, onAddSetter, externalVersion = 0 }) {
+  const [profiles, setProfiles] = useState(null);
+  const [invites, setInvites] = useState(null);
+  const [editing, setEditing] = useState(null); // profile id OR "invite:<email>" OR "new"
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    Promise.all([dataLayer.listProfiles(), dataLayer.listInvites()])
+      .then(([p, i]) => { if (alive) { setProfiles(p); setInvites(i); } })
+      .catch(e => { if (alive) setErr(e.message || String(e)); });
+    return () => { alive = false; };
+  }, [refreshKey, externalVersion]);
+
+  const refresh = () => setRefreshKey(k => k + 1);
+
+  const rolesOf = (p) => {
+    const out = [];
+    if (p.isAdmin) out.push({ key: "admin", label: "Admin", color: col.warn });
+    if (p.creatorId) out.push({ key: "creator", label: "Creator", color: col.accent, entityName: creators.find(c => c.id === p.creatorId)?.name || "(deleted)" });
+    if (p.setterId) out.push({ key: "setter", label: "Setter", color: col.blue, entityName: setters.find(s => s.id === p.setterId)?.name || "(deleted)" });
+    return out;
+  };
+
+  if (err) return <div style={{ ...S.card, padding: 20, color: col.danger }}>Couldn't load users: {err}</div>;
+  if (!profiles || !invites) return <div style={{ ...S.card, padding: 30, color: col.muted, textAlign: "center" }}>Loading…</div>;
+
+  const unassigned = profiles.filter(p => !p.isAdmin && !p.creatorId && !p.setterId);
+  const assigned = profiles.filter(p => p.isAdmin || p.creatorId || p.setterId);
+
+  const handleDeleteInvite = async (email) => {
+    if (!window.confirm(`Cancel invite for ${email}?`)) return;
+    try { await dataLayer.deleteInvite(email); refresh(); }
+    catch (e) { alert(e.message); }
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 10 }}>
+        <div style={{ ...S.sectionLabel, marginBottom: 0 }}>User Management</div>
+        <button style={{ ...btnSm, color: col.warn, borderColor: col.warn + "55" }} onClick={() => setEditing("new")}>+ Add User by Email</button>
+      </div>
+
+      {editing === "new" && (
+        <InviteForm creators={creators} setters={setters}
+          onAddCreator={onAddCreator} onAddSetter={onAddSetter}
+          onCancel={() => setEditing(null)}
+          onSaved={() => { setEditing(null); refresh(); }} />
+      )}
+
+      {/* Pending invites */}
+      {invites.length > 0 && (
+        <>
+          <div style={{ ...S.sectionLabel, marginTop: 24 }}>Pending Invites ({invites.length}) — auto-applies when they sign up</div>
+          {invites.map(i => {
+            const iRoles = [];
+            if (i.isAdmin) iRoles.push({ label: "Admin", color: col.warn });
+            if (i.creatorId) iRoles.push({ label: "Creator", color: col.accent, entityName: creators.find(c => c.id === i.creatorId)?.name });
+            if (i.setterId) iRoles.push({ label: "Setter", color: col.blue, entityName: setters.find(s => s.id === i.setterId)?.name });
+            return (
+              <div key={i.email} style={{ ...S.card, display: "flex", alignItems: "center", gap: 12, padding: "14px 18px" }}>
+                <div style={{ width: 8, height: 8, borderRadius: "50%", background: col.warn, flexShrink: 0 }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{i.email}</div>
+                  <div style={{ fontSize: 11, color: col.muted }}>Invited {fmtDate(i.invitedAt?.split("T")[0])} · waiting for sign-up</div>
+                </div>
+                <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                  {iRoles.map(r => (
+                    <span key={r.label} style={{
+                      padding: "3px 9px", borderRadius: 3, fontSize: 10, fontWeight: 700,
+                      letterSpacing: "0.05em", textTransform: "uppercase",
+                      background: r.color + "22", color: r.color, border: `1px solid ${r.color}44`,
+                    }}>{r.label}{r.entityName ? ` · ${r.entityName}` : ""}</span>
+                  ))}
+                </div>
+                <button style={btnDel} onClick={() => handleDeleteInvite(i.email)}>✕</button>
+              </div>
+            );
+          })}
+        </>
+      )}
+
+      {/* Awaiting assignment (signed up, nothing assigned) */}
+      <div style={{ ...S.sectionLabel, marginTop: 24 }}>Awaiting Assignment ({unassigned.length})</div>
+      {unassigned.length === 0
+        ? <div style={{ ...S.card, padding: 24, textAlign: "center", color: col.muted, marginBottom: 28 }}>Everyone's assigned. ✓</div>
+        : unassigned.map(p => (
+          <UserRow key={p.id} profile={p} creators={creators} setters={setters}
+            onAddCreator={onAddCreator} onAddSetter={onAddSetter}
+            editing={editing === p.id}
+            onEdit={() => setEditing(p.id)}
+            onCancel={() => setEditing(null)}
+            onSaved={() => { setEditing(null); refresh(); }}
+            rolesOf={rolesOf}
+          />
+        ))
+      }
+
+      <div style={{ ...S.sectionLabel, marginTop: 28 }}>Assigned ({assigned.length})</div>
+      {assigned.length === 0
+        ? <div style={{ ...S.card, padding: 24, textAlign: "center", color: col.muted }}>Nobody assigned yet.</div>
+        : assigned.map(p => (
+          <UserRow key={p.id} profile={p} creators={creators} setters={setters}
+            onAddCreator={onAddCreator} onAddSetter={onAddSetter}
+            editing={editing === p.id}
+            onEdit={() => setEditing(p.id)}
+            onCancel={() => setEditing(null)}
+            onSaved={() => { setEditing(null); refresh(); }}
+            rolesOf={rolesOf}
+          />
+        ))
+      }
+    </div>
+  );
+}
+
+// ─── INVITE FORM (add user by email) ─────────────────────────────────────────
+function InviteForm({ creators, setters, onAddCreator, onAddSetter, onCancel, onSaved }) {
+  const [email, setEmail] = useState("");
+  const [name, setName] = useState("");
+  const [assigner, setAssigner] = useState({ resolve: null, valid: true, anySelected: false });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  // Derive a default name from the email handle if user hasn't typed one
+  const effectiveName = name.trim() || email.split("@")[0] || "";
+
+  const submit = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const resolved = await assigner.resolve();
+      await dataLayer.assignByEmail({ email: email.trim(), ...resolved });
+      onSaved();
+    } catch (e) {
+      setErr(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ ...S.card, padding: "22px 24px", background: col.surf2, border: `1px solid ${col.warn}66`, marginBottom: 16 }}>
+      <div style={{ fontFamily: mono, fontSize: 10, color: col.warn, letterSpacing: "0.15em", textTransform: "uppercase", marginBottom: 16 }}>Add User by Email</div>
+
+      <div className="row-split" style={{ display: "flex", gap: 10, marginBottom: 18 }}>
+        <div style={{ flex: 1 }}>
+          <label style={S.label}>Email</label>
+          <input autoFocus type="email" style={S.input} placeholder="them@example.com" value={email} onChange={e => setEmail(e.target.value)} />
+        </div>
+        <div style={{ flex: 1 }}>
+          <label style={S.label}>Display Name <span style={{ color: col.muted, textTransform: "none", letterSpacing: 0, fontWeight: 400 }}>· optional</span></label>
+          <input style={S.input} placeholder={email ? email.split("@")[0] : "Full name"} value={name} onChange={e => setName(e.target.value)} />
+        </div>
+      </div>
+
+      <RoleAssignmentFields
+        onAddCreator={onAddCreator} onAddSetter={onAddSetter}
+        value={{ isAdmin: false, creatorId: null, setterId: null }}
+        onChange={setAssigner}
+        displayName={effectiveName} />
+
+      {err && <div style={{ background: `${col.danger}1a`, border: `1px solid ${col.danger}55`, color: col.danger, padding: "10px 12px", borderRadius: 6, fontSize: 13, marginTop: 14 }}>{err}</div>}
+
+      <div style={{ display: "flex", gap: 8, marginTop: 18 }}>
+        <button style={btnA} onClick={submit} disabled={busy || !email.trim() || !assigner.valid}>
+          {busy ? "Saving…" : assigner.anySelected ? "Save" : "Add Email (no role yet)"}
+        </button>
+        <button style={btnG} onClick={onCancel}>Cancel</button>
+      </div>
+
+      <p style={{ marginTop: 14, fontSize: 11, color: col.muted, lineHeight: 1.5 }}>
+        If this email already has an account, roles apply immediately. Otherwise a pending invite is saved and auto-applied on their next sign-up. When they sign in with Google, their Google name overrides the Display Name above — you can re-edit anytime.
+      </p>
+    </div>
+  );
+}
+
+// Role assignment editor — checkbox model only, no entity picking.
+// Checking Creator/Setter auto-creates a fresh entity (named from displayName).
+// Admin role requires typing "admin" in a confirmation box to avoid accidents.
+function RoleAssignmentFields({ onAddCreator, onAddSetter, value, onChange, displayName }) {
+  const [isAdmin, setIsAdmin] = useState(value.isAdmin);
+  const [isCreator, setIsCreator] = useState(!!value.creatorId);
+  const [isSetter, setIsSetter] = useState(!!value.setterId);
+  const [adminConfirm, setAdminConfirm] = useState("");
+
+  // Resolve to final {isAdmin, creatorId, setterId}. Entities are created only
+  // when newly checked (no entity exists yet); existing links are preserved.
+  const resolve = async () => {
+    if (isAdmin && !value.isAdmin && adminConfirm.trim().toLowerCase() !== "admin") {
+      throw new Error('Type "admin" in the confirmation box to grant admin role.');
+    }
+    let creatorId = null;
+    let setterId = null;
+    if (isCreator) {
+      if (value.creatorId) {
+        creatorId = value.creatorId; // preserve existing link
+      } else {
+        const name = (displayName || "").trim();
+        if (!name) throw new Error("Display name required to create a creator entity.");
+        const nc = await onAddCreator(name);
+        creatorId = nc.id;
+      }
+    }
+    if (isSetter) {
+      if (value.setterId) {
+        setterId = value.setterId;
+      } else {
+        const name = (displayName || "").trim();
+        if (!name) throw new Error("Display name required to create a setter entity.");
+        const ns = await onAddSetter(name);
+        setterId = ns.id;
+      }
+    }
+    return { isAdmin, creatorId, setterId };
+  };
+
+  const needsAdminConfirm = isAdmin && !value.isAdmin;
+  const adminConfirmed = !needsAdminConfirm || adminConfirm.trim().toLowerCase() === "admin";
+  const needsDisplayName = (isCreator && !value.creatorId) || (isSetter && !value.setterId);
+  const hasDisplayName = !needsDisplayName || (displayName || "").trim().length > 0;
+  const valid = adminConfirmed && hasDisplayName;
+  const anySelected = isAdmin || isCreator || isSetter;
+
+  useEffect(() => {
+    onChange({ resolve, valid, anySelected });
+  }, [isAdmin, isCreator, isSetter, adminConfirm, displayName]);
+
+  return (
+    <div>
+      <label style={S.label}>Roles (pick any combination)</label>
+
+      {/* Creator */}
+      <CheckboxRow label="Creator" color={col.accent} checked={isCreator} onChange={setIsCreator}
+        desc={value.creatorId ? "Already linked — uncheck to unlink." : "Creates a fresh creator profile under their display name."} />
+
+      {/* Setter */}
+      <CheckboxRow label="Setter" color={col.blue} checked={isSetter} onChange={setIsSetter}
+        desc={value.setterId ? "Already linked — uncheck to unlink." : "Creates a fresh setter profile under their display name."} />
+
+      {/* Display name warning */}
+      {needsDisplayName && !hasDisplayName && (
+        <div style={{ marginLeft: 26, marginTop: -4, marginBottom: 8, fontSize: 12, color: col.warn, lineHeight: 1.5 }}>
+          ⚠ Set a Display Name above — the new entity needs a name.
+        </div>
+      )}
+
+      {/* Admin (gated) */}
+      <CheckboxRow label="Admin" color={col.warn} checked={isAdmin} onChange={(v) => { setIsAdmin(v); if (!v) setAdminConfirm(""); }}
+        desc="Full team control — see + edit every creator, setter, and user." />
+
+      {needsAdminConfirm && (
+        <div style={{ marginLeft: 26, marginTop: 6, marginBottom: 6 }}>
+          <div style={{ background: `${col.danger}1a`, border: `1px solid ${col.danger}66`, padding: "12px 14px", borderRadius: 6, marginBottom: 10 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: col.danger, marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 14 }}>⚠</span> Granting admin = full access
+            </div>
+            <div style={{ fontSize: 12, color: col.text, lineHeight: 1.5 }}>
+              Admins can view & edit ALL data — every creator's videos, every setter's leads + EODs, the full pipeline. They can also assign/remove other admins (including yourself). Only do this for people you fully trust to operate the team.
+            </div>
+          </div>
+          <label style={{ ...S.label, color: col.danger }}>Type <strong>admin</strong> to confirm</label>
+          <input style={{
+            ...S.input,
+            borderColor: adminConfirmed ? col.success : col.danger,
+            background: col.surf,
+          }} placeholder='Type "admin"' value={adminConfirm} onChange={e => setAdminConfirm(e.target.value)} autoComplete="off" />
+          {adminConfirmed && <div style={{ fontSize: 11, color: col.success, marginTop: 6, fontWeight: 700 }}>✓ Confirmation accepted</div>}
+        </div>
+      )}
+
+      {value.isAdmin && !isAdmin && (
+        <div style={{ marginLeft: 26, marginTop: 6, fontSize: 12, color: col.warn, lineHeight: 1.5 }}>
+          ⚠ This will revoke admin access on save.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CheckboxRow({ label, color, checked, onChange, desc }) {
+  return (
+    <label style={{ display: "flex", alignItems: "flex-start", gap: 12, cursor: "pointer", padding: "10px 0" }}>
+      <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)}
+        style={{ width: 16, height: 16, marginTop: 2, cursor: "pointer", accentColor: color }} />
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 700, color: checked ? color : col.text }}>{label}</div>
+        {desc && <div style={{ fontSize: 11, color: col.muted, marginTop: 2, lineHeight: 1.4 }}>{desc}</div>}
+      </div>
+    </label>
+  );
+}
+
+function UserRow({ profile, creators, setters, onAddCreator, onAddSetter, editing, onEdit, onCancel, onSaved, rolesOf }) {
+  const [name, setName] = useState(profile.name || "");
+  const [assigner, setAssigner] = useState({ resolve: null, valid: true, anySelected: false });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => { if (editing) { setName(profile.name || ""); setErr(null); } }, [editing, profile]);
+
+  const save = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const resolved = await assigner.resolve();
+      const updates = { name: name.trim() || null, ...resolved };
+      await dataLayer.updateProfile(profile.id, updates);
+      onSaved();
+    } catch (e) {
+      setErr(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (editing) {
+    return (
+      <div style={{ ...S.card, padding: "22px 24px", background: col.surf2, border: `1px solid ${col.warn}66` }}>
+        <div style={{ fontFamily: mono, fontSize: 10, color: col.warn, letterSpacing: "0.15em", textTransform: "uppercase", marginBottom: 14 }}>Edit User</div>
+        <div style={{ marginBottom: 16, padding: "10px 12px", background: col.surf, borderRadius: 6, border: `1px solid ${col.border}` }}>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 3 }}>{profile.email}</div>
+          <div style={{ fontFamily: mono, fontSize: 11, color: col.muted }}>{profile.id}</div>
+        </div>
+
+        <div style={{ marginBottom: 18 }}>
+          <label style={S.label}>Display Name <span style={{ color: col.muted, textTransform: "none", letterSpacing: 0, fontWeight: 400 }}>· override Google's name if needed</span></label>
+          <input style={S.input} placeholder="Their display name" value={name} onChange={e => setName(e.target.value)} />
+        </div>
+
+        <RoleAssignmentFields
+          onAddCreator={onAddCreator} onAddSetter={onAddSetter}
+          value={{ isAdmin: profile.isAdmin, creatorId: profile.creatorId, setterId: profile.setterId }}
+          onChange={setAssigner}
+          displayName={name.trim() || profile.email?.split("@")[0] || ""} />
+
+        {err && <div style={{ background: `${col.danger}1a`, border: `1px solid ${col.danger}55`, color: col.danger, padding: "10px 12px", borderRadius: 6, fontSize: 13, marginTop: 14 }}>{err}</div>}
+
+        <div style={{ display: "flex", gap: 8, marginTop: 18 }}>
+          <button style={btnA} onClick={save} disabled={busy || !assigner.valid}>{busy ? "Saving…" : "Save"}</button>
+          <button style={btnG} onClick={onCancel}>Cancel</button>
+        </div>
+      </div>
+    );
+  }
+
+  const displayName = profile.name || profile.email.split("@")[0];
+  const roles = rolesOf(profile);
+
+  return (
+    <div style={{ ...S.card, display: "flex", alignItems: "center", gap: 12, padding: "14px 18px", cursor: "pointer" }} className="clickable-card" onClick={onEdit}>
+      <div style={{ width: 8, height: 8, borderRadius: "50%", background: roles[0]?.color || col.muted, flexShrink: 0 }} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{displayName}</div>
+        <div style={{ fontSize: 11, color: col.muted, fontFamily: mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{profile.email}</div>
+      </div>
+      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", justifyContent: "flex-end" }}>
+        {roles.length === 0
+          ? <span style={{ padding: "4px 10px", borderRadius: 3, fontSize: 10, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", background: col.muted + "22", color: col.muted, border: `1px solid ${col.muted}44` }}>Unassigned</span>
+          : roles.map(r => (
+            <span key={r.key} style={{
+              padding: "4px 10px", borderRadius: 3, fontSize: 10, fontWeight: 700,
+              letterSpacing: "0.05em", textTransform: "uppercase",
+              background: r.color + "22", color: r.color, border: `1px solid ${r.color}44`,
+            }}>{r.label}{r.entityName ? ` · ${r.entityName}` : ""}</span>
+          ))}
+      </div>
+      <div style={{ fontSize: 11, color: col.muted, opacity: 0.5 }}>edit →</div>
     </div>
   );
 }
 
 // ─── ADMIN CREATORS VIEW ─────────────────────────────────────────────────────
 function AdminCreatorsView({ creators, videosMap, onAdd, onRemove, onSelect }) {
-  const [newName, setNewName] = useState("");
-  const [adding, setAdding] = useState(false);
   const cutoff = daysAgo(30);
 
   const stats = useMemo(() => creators.map(c => {
@@ -1428,22 +2082,7 @@ function AdminCreatorsView({ creators, videosMap, onAdd, onRemove, onSelect }) {
         />
       )}
 
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-        <div style={{ ...S.sectionLabel, marginBottom: 0 }}>Creator Leaderboard</div>
-        <button style={btnSm} onClick={() => setAdding(!adding)}>+ Add Creator</button>
-      </div>
-
-      {adding && (
-        <div style={{ ...S.card, display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
-          <div style={{ flex: 1, minWidth: 200 }}>
-            <label style={S.label}>Creator Name</label>
-            <input autoFocus style={S.input} placeholder="Full name..." value={newName} onChange={e => setNewName(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && newName.trim() && (onAdd(newName.trim()), setNewName(""), setAdding(false))} />
-          </div>
-          <button style={btnA} onClick={() => { if (newName.trim()) { onAdd(newName.trim()); setNewName(""); setAdding(false); } }}>Add</button>
-          <button style={btnG} onClick={() => { setAdding(false); setNewName(""); }}>Cancel</button>
-        </div>
-      )}
+      <div style={{ ...S.sectionLabel, marginBottom: 12 }}>Creator Leaderboard</div>
 
       {stats.length === 0
         ? <div style={{ ...S.card, textAlign: "center", color: col.muted, padding: 40 }}>No creators yet.</div>
@@ -1474,8 +2113,6 @@ function AdminCreatorsView({ creators, videosMap, onAdd, onRemove, onSelect }) {
 
 // ─── ADMIN SETTERS VIEW ──────────────────────────────────────────────────────
 function AdminSettersView({ setters, eodMap, onAdd, onRemove, onSelect }) {
-  const [newName, setNewName] = useState("");
-  const [adding, setAdding] = useState(false);
   const cutoff = daysAgo(30);
   const today = todayStr();
 
@@ -1585,22 +2222,7 @@ function AdminSettersView({ setters, eodMap, onAdd, onRemove, onSelect }) {
         />
       )}
 
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-        <div style={{ ...S.sectionLabel, marginBottom: 0 }}>Setter Leaderboard</div>
-        <button style={btnSm} onClick={() => setAdding(!adding)}>+ Add Setter</button>
-      </div>
-
-      {adding && (
-        <div style={{ ...S.card, display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
-          <div style={{ flex: 1, minWidth: 200 }}>
-            <label style={S.label}>Setter Name</label>
-            <input autoFocus style={S.input} placeholder="Full name..." value={newName} onChange={e => setNewName(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && newName.trim() && (onAdd(newName.trim()), setNewName(""), setAdding(false))} />
-          </div>
-          <button style={btnB} onClick={() => { if (newName.trim()) { onAdd(newName.trim()); setNewName(""); setAdding(false); } }}>Add</button>
-          <button style={btnG} onClick={() => { setAdding(false); setNewName(""); }}>Cancel</button>
-        </div>
-      )}
+      <div style={{ ...S.sectionLabel, marginBottom: 12 }}>Setter Leaderboard</div>
 
       {stats.length === 0
         ? <div style={{ ...S.card, textAlign: "center", color: col.muted, padding: 40 }}>No setters yet.</div>
