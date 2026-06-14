@@ -319,3 +319,155 @@ end$$;
 -- left join eod_reports e on e.setter_id = s.id and e.date >= current_date - interval '30 days'
 -- left join lateral jsonb_each(e.platforms) p on true
 -- group by s.id, s.name;
+
+-- ============================================================================
+-- VIDEO EDITOR + RECRUITER roles & HIRE pipeline
+-- ============================================================================
+-- Additive extension mirroring the creators/setters/videos/eod_reports patterns.
+-- Safe to re-run. Run once in Supabase -> SQL Editor after deploying the new UI.
+-- ============================================================================
+
+-- ── Entity tables (mirror creators / setters) ──────────────────────────────
+create table if not exists editors (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null,
+  added_at    date not null default current_date,
+  created_at  timestamptz not null default now()
+);
+
+create table if not exists recruiters (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null,
+  added_at    date not null default current_date,
+  created_at  timestamptz not null default now()
+);
+
+-- ── Edits (mirror videos) ──────────────────────────────────────────────────
+create table if not exists edits (
+  id            uuid primary key default gen_random_uuid(),
+  editor_id     uuid not null references editors(id) on delete cascade,
+  url           text not null,
+  type          text not null,            -- Talking Head | Skit | Showcase
+  edited_for    text not null,            -- Clients | OutScript
+  time_raw      text,                     -- free-form "45m", "1.5h"
+  time_min      integer not null default 0,
+  count         integer not null default 1,
+  edit_date     date not null,
+  last_updated  timestamptz not null default now(),
+  created_at    timestamptz not null default now()
+);
+
+-- ── Recruiter EOD (mirror eod_reports) ─────────────────────────────────────
+create table if not exists recruit_reports (
+  id            uuid primary key default gen_random_uuid(),
+  recruiter_id  uuid not null references recruiters(id) on delete cascade,
+  date          date not null,
+  platforms     jsonb not null default '{}'::jsonb,
+  notes         text,
+  submitted_at  timestamptz not null default now(),
+  last_updated  timestamptz not null default now(),
+  unique (recruiter_id, date)
+);
+
+-- ── Hires (recruiter-owned candidate pipeline) ─────────────────────────────
+create table if not exists hires (
+  id            uuid primary key default gen_random_uuid(),
+  recruiter_id  uuid not null references recruiters(id) on delete cascade,
+  name          text not null,
+  role          text not null default 'Unspecified',
+  email         text,
+  phone         text,
+  status        text not null default 'Trial',  -- Trial | Hired | Dropped
+  details       text,
+  hire_date     date not null default current_date,
+  created_at    timestamptz not null default now(),
+  last_updated  timestamptz not null default now()
+);
+
+-- ── Link new roles into profiles + pending_invites ─────────────────────────
+alter table profiles        add column if not exists editor_id    uuid references editors(id)    on delete set null;
+alter table profiles        add column if not exists recruiter_id uuid references recruiters(id) on delete set null;
+alter table pending_invites add column if not exists editor_id    uuid references editors(id)    on delete set null;
+alter table pending_invites add column if not exists recruiter_id uuid references recruiters(id) on delete set null;
+
+-- ── Re-create the signup trigger to also consume editor/recruiter invites ──
+-- CREATE OR REPLACE supersedes the earlier definition; the existing
+-- on_auth_user_created trigger picks up this version automatically.
+create or replace function handle_new_user()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  inv record;
+  display_name text;
+begin
+  select is_admin, creator_id, setter_id, editor_id, recruiter_id into inv
+  from public.pending_invites
+  where lower(email) = lower(new.email);
+
+  display_name := coalesce(
+    new.raw_user_meta_data->>'name',
+    new.raw_user_meta_data->>'full_name',
+    new.raw_user_meta_data->>'preferred_username',
+    split_part(new.email, '@', 1)
+  );
+
+  insert into public.profiles (id, email, name, is_admin, creator_id, setter_id, editor_id, recruiter_id)
+  values (new.id, new.email, display_name, coalesce(inv.is_admin, false), inv.creator_id, inv.setter_id, inv.editor_id, inv.recruiter_id)
+  on conflict (id) do nothing;
+
+  delete from public.pending_invites where lower(email) = lower(new.email);
+
+  return new;
+end;
+$$;
+
+-- ── Indexes ────────────────────────────────────────────────────────────────
+create index if not exists edits_editor_id_idx        on edits(editor_id);
+create index if not exists edits_edit_date_idx        on edits(edit_date desc);
+create index if not exists edits_editor_date_idx      on edits(editor_id, edit_date desc);
+
+create index if not exists recruit_recruiter_id_idx   on recruit_reports(recruiter_id);
+create index if not exists recruit_date_idx           on recruit_reports(date desc);
+create index if not exists recruit_recruiter_date_idx on recruit_reports(recruiter_id, date desc);
+
+create index if not exists hires_recruiter_id_idx     on hires(recruiter_id);
+create index if not exists hires_status_idx           on hires(status);
+
+-- ── Grants (anon + authenticated, matching the existing permissive model) ──
+grant select, insert, update, delete on editors         to anon, authenticated;
+grant select, insert, update, delete on recruiters      to anon, authenticated;
+grant select, insert, update, delete on edits           to anon, authenticated;
+grant select, insert, update, delete on recruit_reports to anon, authenticated;
+grant select, insert, update, delete on hires           to anon, authenticated;
+
+-- ── RLS (permissive — matches creators/setters/videos/eod_reports/leads) ───
+alter table editors         enable row level security;
+alter table recruiters      enable row level security;
+alter table edits           enable row level security;
+alter table recruit_reports enable row level security;
+alter table hires           enable row level security;
+
+drop policy if exists "anon_all_editors"         on editors;
+drop policy if exists "anon_all_recruiters"      on recruiters;
+drop policy if exists "anon_all_edits"           on edits;
+drop policy if exists "anon_all_recruit_reports" on recruit_reports;
+drop policy if exists "anon_all_hires"           on hires;
+
+create policy "anon_all_editors"         on editors         for all to anon, authenticated using (true) with check (true);
+create policy "anon_all_recruiters"      on recruiters      for all to anon, authenticated using (true) with check (true);
+create policy "anon_all_edits"           on edits           for all to anon, authenticated using (true) with check (true);
+create policy "anon_all_recruit_reports" on recruit_reports for all to anon, authenticated using (true) with check (true);
+create policy "anon_all_hires"           on hires           for all to anon, authenticated using (true) with check (true);
+
+-- ── Realtime ───────────────────────────────────────────────────────────────
+do $$
+begin
+  begin alter publication supabase_realtime add table editors;         exception when others then null; end;
+  begin alter publication supabase_realtime add table recruiters;      exception when others then null; end;
+  begin alter publication supabase_realtime add table edits;           exception when others then null; end;
+  begin alter publication supabase_realtime add table recruit_reports; exception when others then null; end;
+  begin alter publication supabase_realtime add table hires;           exception when others then null; end;
+end$$;

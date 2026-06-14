@@ -3,8 +3,18 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>LocaScale — Daily Tracker</title>
-    <style>html,body,#root{height:100%;background:#090909;}</style>
+    <title>OutScript — Tracker</title>
+    <script>
+      try {
+        var t = localStorage.getItem('tt_theme') || (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+        document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {}
+    </script>
+    <style>
+      html { height: 100%; background: #fafaf8; }
+      html[data-theme="dark"] { background: #0b0b0d; }
+      body, #root { min-height: 100%; }
+    </style>
   </head>
   <body>
     <div id="root"></div>

@@ -7,6 +7,27 @@ const PLATFORM_COLORS = {
   Instagram: "#E1306C", YouTube: "#FF0000", TikTok: "#00f2ea",
   LinkedIn: "#0A66C2", X: "#eee", Facebook: "#1877F2", School: "#FF6B35",
 };
+
+// ── Video Editor ──────────────────────────────────────────────────────────
+const EDIT_TYPES = ["Talking Head", "Skit", "Showcase"];
+const EDIT_FOR = ["Clients", "OutScript"];
+
+// ── Recruiter ─────────────────────────────────────────────────────────────
+const RECRUIT_PLATFORMS = ["Discord", "Facebook", "School Community", "Other"];
+const RECRUIT_PLATFORM_COLORS = {
+  Discord: "#5865f2", Facebook: "#1877F2", "School Community": "#c8ff00", Other: "#e3b341",
+};
+const RECRUIT_FIELDS = [
+  { key: "groups", label: "Groups Posted In" },
+  { key: "applications", label: "Applications" },
+  { key: "onboarded", label: "Onboarded" },
+  { key: "firstVideo", label: "Posted 1st Video" },
+  { key: "reposters", label: "Active Reposters" },
+];
+
+// ── Hire pipeline ───────────────────────────────────────────────────────────
+const HIRE_STATUSES = ["Trial", "Hired", "Dropped"];
+const HIRE_STATUS_COLORS = { Trial: "#ffcc00", Hired: "#c8ff00", Dropped: "#ff4d6d" };
 const SETTER_FIELDS = [
   { key: "newMessages", label: "New Messages" },
   { key: "followUps", label: "Follow-Ups" },
@@ -51,6 +72,24 @@ const daysAgo = (n) => {
 };
 const pct = (a, b) => b > 0 ? Math.round((a / b) * 100) : 0;
 
+// Parse free-form edit time -> minutes. "45m", "1.5h", "1h 30m", bare "90" => minutes.
+const timeToMin = (s) => {
+  if (!s) return 0;
+  s = String(s).toLowerCase().trim();
+  let m = 0;
+  const h = s.match(/([\d.]+)\s*h/);
+  const mm = s.match(/([\d.]+)\s*m/);
+  if (h) m += parseFloat(h[1]) * 60;
+  if (mm) m += parseFloat(mm[1]);
+  if (!h && !mm) { const n = parseFloat(s); if (!isNaN(n)) m += n; }
+  return Math.round(m);
+};
+const minToStr = (m) => {
+  if (!m) return "0m";
+  const h = Math.floor(m / 60), r = m % 60;
+  return h ? `${h}h ${r ? r + "m" : ""}`.trim() : `${r}m`;
+};
+
 // Build [{date, value}] for the last N days. Missing days fill to 0.
 const dailyBucket = (items, getDate, getValue, days = 30) => {
   const buckets = {};
@@ -66,17 +105,24 @@ const dailyBucket = (items, getDate, getValue, days = 30) => {
 const eodTotal = (eod, field) =>
   Object.values(eod?.platforms || {}).reduce((s, p) => s + (parseInt(p[field]) || 0), 0);
 
+// Neutrals route through CSS variables (defined in src/theme.css) so light/dark
+// is a single [data-theme] toggle. Accents stay as fixed hex — refined tones that
+// read well on both paper-white and near-black — so alpha concatenation (`col.x + "22"`)
+// keeps working. Glows collapse to transparent for the flat, minimal look.
 const col = {
-  bg: "#070708", surf: "#131316", surf2: "#1c1c21", surf3: "#26262d",
-  border: "#2a2a32", borderHi: "#3a3a44",
-  text: "#f5f5f7", muted: "#7a7a85", muted2: "#b3b3bf",
-  accent: "#c8ff00", accentDim: "#8aae00",
-  success: "#00ff8c", danger: "#ff4d6d", warn: "#ffcc00",
-  blue: "#6aa8ff", blueDim: "#3d6db5",
-  glow: "rgba(200,255,0,0.08)", glowBlue: "rgba(106,168,255,0.08)",
+  bg: "var(--bg)", surf: "var(--surf)", surf2: "var(--surf2)", surf3: "var(--surf3)",
+  border: "var(--border)", borderHi: "var(--border-hi)",
+  text: "var(--text)", muted: "var(--muted)", muted2: "var(--muted2)",
+  accent: "#3fae6a", accentDim: "#2f8f54",
+  success: "#36a56b", danger: "#e5484d", warn: "#cf8a2e",
+  blue: "#4f74e3", blueDim: "#3a57b5",
+  magenta: "#d8568e", magentaDim: "#b03f72",
+  cyan: "#1fa3a3", cyanDim: "#177e7e",
+  glow: "var(--glow)", glowBlue: "var(--glow)",
+  glowMagenta: "var(--glow)", glowCyan: "var(--glow)",
 };
-const font = "'DM Sans', 'Helvetica Neue', sans-serif";
-const mono = "'JetBrains Mono', 'Courier New', monospace";
+const font = "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+const mono = "'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, monospace";
 
 const S = {
   page: { minHeight: "100vh", background: col.bg, color: col.text, fontFamily: font },
@@ -302,8 +348,13 @@ export default function App() {
   const [videosMap, setVideosMap] = useState({});
   const [eodMap, setEodMap] = useState({});
   const [leadsMap, setLeadsMap] = useState({});
+  const [editors, setEditors] = useState([]);
+  const [recruiters, setRecruiters] = useState([]);
+  const [editsMap, setEditsMap] = useState({});
+  const [recruitMap, setRecruitMap] = useState({});
+  const [hiresMap, setHiresMap] = useState({});
   const [focusId, setFocusId] = useState(null);
-  const [adminView, setAdminView] = useState("main"); // "main" | "creator-detail" | "setter-detail"
+  const [adminView, setAdminView] = useState("main"); // "main" | "creator-detail" | "setter-detail" | "editor-detail" | "recruiter-detail"
   const [ready, setReady] = useState(false);
   const [loadError, setLoadError] = useState(null);
 
@@ -318,12 +369,18 @@ export default function App() {
   const [profilesVersion, setProfilesVersion] = useState(0);
 
   const load = async () => {
-    const { creators: c, setters: s, videosMap: vm, eodMap: em, leadsMap: lm } = await dataLayer.loadAll();
+    const { creators: c, setters: s, videosMap: vm, eodMap: em, leadsMap: lm,
+            editors: ed, recruiters: rc, editsMap: edm, recruitMap: rcm, hiresMap: hm } = await dataLayer.loadAll();
     setCreators(c);
     setSetters(s);
     setVideosMap(vm);
     setEodMap(em);
     setLeadsMap(lm);
+    setEditors(ed);
+    setRecruiters(rc);
+    setEditsMap(edm);
+    setRecruitMap(rcm);
+    setHiresMap(hm);
   };
 
   // Establish session
@@ -393,6 +450,44 @@ export default function App() {
           if (ev.type === "INSERT") return { ...p, [id]: cur.some(l => l.id === ev.new.id) ? cur : [...cur, ev.new] };
           if (ev.type === "UPDATE") return { ...p, [id]: cur.map(l => l.id === ev.new.id ? ev.new : l) };
           if (ev.type === "DELETE") return { ...p, [id]: cur.filter(l => l.id !== ev.old.id) };
+          return p;
+        });
+      } else if (table === "editors") {
+        if (ev.type === "INSERT") setEditors(prev => prev.some(x => x.id === ev.new.id) ? prev : [...prev, ev.new]);
+        else if (ev.type === "UPDATE") setEditors(prev => prev.map(x => x.id === ev.new.id ? ev.new : x));
+        else if (ev.type === "DELETE") setEditors(prev => prev.filter(x => x.id !== ev.old.id));
+      } else if (table === "recruiters") {
+        if (ev.type === "INSERT") setRecruiters(prev => prev.some(x => x.id === ev.new.id) ? prev : [...prev, ev.new]);
+        else if (ev.type === "UPDATE") setRecruiters(prev => prev.map(x => x.id === ev.new.id ? ev.new : x));
+        else if (ev.type === "DELETE") setRecruiters(prev => prev.filter(x => x.id !== ev.old.id));
+      } else if (table === "edits") {
+        const id = ev.new?.editorId || ev.old?.editorId;
+        if (!id) return;
+        setEditsMap(p => {
+          const cur = p[id] || [];
+          if (ev.type === "INSERT") return { ...p, [id]: cur.some(x => x.id === ev.new.id) ? cur : [...cur, ev.new] };
+          if (ev.type === "UPDATE") return { ...p, [id]: cur.map(x => x.id === ev.new.id ? ev.new : x) };
+          if (ev.type === "DELETE") return { ...p, [id]: cur.filter(x => x.id !== ev.old.id) };
+          return p;
+        });
+      } else if (table === "recruit_reports") {
+        const id = ev.new?.recruiterId || ev.old?.recruiterId;
+        if (!id) return;
+        setRecruitMap(p => {
+          const cur = p[id] || [];
+          if (ev.type === "INSERT") return { ...p, [id]: cur.some(x => x.id === ev.new.id) ? cur : [...cur, ev.new] };
+          if (ev.type === "UPDATE") return { ...p, [id]: cur.map(x => x.id === ev.new.id ? ev.new : x) };
+          if (ev.type === "DELETE") return { ...p, [id]: cur.filter(x => x.id !== ev.old.id) };
+          return p;
+        });
+      } else if (table === "hires") {
+        const id = ev.new?.recruiterId || ev.old?.recruiterId;
+        if (!id) return;
+        setHiresMap(p => {
+          const cur = p[id] || [];
+          if (ev.type === "INSERT") return { ...p, [id]: cur.some(x => x.id === ev.new.id) ? cur : [...cur, ev.new] };
+          if (ev.type === "UPDATE") return { ...p, [id]: cur.map(x => x.id === ev.new.id ? ev.new : x) };
+          if (ev.type === "DELETE") return { ...p, [id]: cur.filter(x => x.id !== ev.old.id) };
           return p;
         });
       } else if (table === "profiles") {
@@ -488,11 +583,86 @@ export default function App() {
     setLeadsMap(p => ({ ...p, [setterId]: (p[setterId] || []).filter(l => l.id !== leadId) }));
   });
 
+  // ── Editor handlers ─────────────────────────────────────────────────────
+  const addEditor = async (name) => {
+    try {
+      const ne = await dataLayer.addEditor(name);
+      setEditors(prev => prev.some(x => x.id === ne.id) ? prev : [...prev, ne]);
+      setEditsMap(p => ({ ...p, [ne.id]: p[ne.id] || [] }));
+      return ne;
+    } catch (e) { console.error(e); alert(e.message || String(e)); throw e; }
+  };
+  const removeEditor = async (id) => wrap(async () => {
+    await dataLayer.removeEditor(id);
+    setEditors(prev => prev.filter(e => e.id !== id));
+    setEditsMap(p => { const n = { ...p }; delete n[id]; return n; });
+  });
+  const saveEdit = async (editorId, edit) => wrap(async () => {
+    const saved = await dataLayer.saveEdit(editorId, edit);
+    setEditsMap(p => {
+      const cur = p[editorId] || [];
+      const idx = cur.findIndex(x => x.id === saved.id);
+      const next = idx >= 0 ? cur.map(x => x.id === saved.id ? saved : x) : [...cur, saved];
+      return { ...p, [editorId]: next };
+    });
+  });
+  const deleteEdit = async (editorId, editId) => wrap(async () => {
+    await dataLayer.deleteEdit(editId);
+    setEditsMap(p => ({ ...p, [editorId]: (p[editorId] || []).filter(x => x.id !== editId) }));
+  });
+
+  // ── Recruiter handlers ──────────────────────────────────────────────────
+  const addRecruiter = async (name) => {
+    try {
+      const nr = await dataLayer.addRecruiter(name);
+      setRecruiters(prev => prev.some(x => x.id === nr.id) ? prev : [...prev, nr]);
+      setRecruitMap(p => ({ ...p, [nr.id]: p[nr.id] || [] }));
+      setHiresMap(p => ({ ...p, [nr.id]: p[nr.id] || [] }));
+      return nr;
+    } catch (e) { console.error(e); alert(e.message || String(e)); throw e; }
+  };
+  const removeRecruiter = async (id) => wrap(async () => {
+    await dataLayer.removeRecruiter(id);
+    setRecruiters(prev => prev.filter(r => r.id !== id));
+    setRecruitMap(p => { const n = { ...p }; delete n[id]; return n; });
+    setHiresMap(p => { const n = { ...p }; delete n[id]; return n; });
+  });
+  const saveRecruitEOD = async (recruiterId, eod) => wrap(async () => {
+    const saved = await dataLayer.saveRecruitEOD(recruiterId, eod);
+    setRecruitMap(p => {
+      const cur = (p[recruiterId] || []).filter(e => e.date !== saved.date && e.id !== saved.id);
+      return { ...p, [recruiterId]: [...cur, saved] };
+    });
+  });
+
+  // ── Hire handlers ───────────────────────────────────────────────────────
+  const saveHire = async (recruiterId, hire) => wrap(async () => {
+    const saved = await dataLayer.saveHire(recruiterId, hire);
+    setHiresMap(p => {
+      const cur = p[recruiterId] || [];
+      const idx = cur.findIndex(x => x.id === saved.id);
+      const next = idx >= 0 ? cur.map(x => x.id === saved.id ? saved : x) : [...cur, saved];
+      return { ...p, [recruiterId]: next };
+    });
+  });
+  const updateHire = async (recruiterId, id, patch) => wrap(async () => {
+    const saved = await dataLayer.updateHire(id, patch);
+    setHiresMap(p => ({ ...p, [recruiterId]: (p[recruiterId] || []).map(x => x.id === id ? saved : x) }));
+  });
+  const deleteHire = async (recruiterId, id) => wrap(async () => {
+    await dataLayer.deleteHire(id);
+    setHiresMap(p => ({ ...p, [recruiterId]: (p[recruiterId] || []).filter(x => x.id !== id) }));
+  });
+
   const focusCreator = creators.find(c => c.id === focusId);
   const focusSetter = setters.find(s => s.id === focusId);
+  const focusEditor = editors.find(e => e.id === focusId);
+  const focusRecruiter = recruiters.find(r => r.id === focusId);
   const myCreator = profile?.creatorId ? creators.find(c => c.id === profile.creatorId) : null;
   const mySetter = profile?.setterId ? setters.find(s => s.id === profile.setterId) : null;
-  const [activeRole, setActiveRole] = useState(null); // "creator" | "setter" | "admin" — for users with multiple
+  const myEditor = profile?.editorId ? editors.find(e => e.id === profile.editorId) : null;
+  const myRecruiter = profile?.recruiterId ? recruiters.find(r => r.id === profile.recruiterId) : null;
+  const [activeRole, setActiveRole] = useState(null); // "creator" | "setter" | "editor" | "recruiter" | "admin" — for users with multiple
 
   // Auto-pick a default active role based on what the user has
   useEffect(() => {
@@ -500,14 +670,18 @@ export default function App() {
     if (profile.isAdmin) { setActiveRole("admin"); return; }
     if (myCreator) { setActiveRole("creator"); return; }
     if (mySetter) { setActiveRole("setter"); return; }
+    if (myEditor) { setActiveRole("editor"); return; }
+    if (myRecruiter) { setActiveRole("recruiter"); return; }
     setActiveRole(null);
-  }, [profile?.id, profile?.isAdmin, myCreator?.id, mySetter?.id]);
+  }, [profile?.id, profile?.isAdmin, myCreator?.id, mySetter?.id, myEditor?.id, myRecruiter?.id]);
 
   // Roles the user has access to (for the switcher in dashboard header)
   const availableRoles = [];
   if (profile?.isAdmin) availableRoles.push({ key: "admin", label: "Admin", color: col.warn });
   if (myCreator) availableRoles.push({ key: "creator", label: "Creator", color: col.accent });
   if (mySetter) availableRoles.push({ key: "setter", label: "Setter", color: col.blue });
+  if (myEditor) availableRoles.push({ key: "editor", label: "Editor", color: col.magenta });
+  if (myRecruiter) availableRoles.push({ key: "recruiter", label: "Recruiter", color: col.cyan });
 
   const handleSignOut = async () => {
     try { await auth.signOut(); } catch (e) { console.error(e); }
@@ -543,96 +717,6 @@ export default function App() {
 
   return (
     <>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700;9..40,800&family=JetBrains+Mono:wght@400;700&display=swap');
-        * { box-sizing: border-box; margin: 0; padding: 0; -webkit-font-smoothing: antialiased; }
-        html, body { background: ${col.bg}; }
-        body {
-          background-image:
-            radial-gradient(900px circle at 12% -10%, ${col.glow}, transparent 55%),
-            radial-gradient(900px circle at 95% 5%, ${col.glowBlue}, transparent 55%);
-          background-attachment: fixed;
-        }
-        input::placeholder, textarea::placeholder { color: #4a4a55; }
-        input:focus, select:focus, textarea:focus {
-          border-color: ${col.accent} !important;
-          box-shadow: 0 0 0 3px ${col.glow};
-        }
-        button { transition: transform 0.12s, opacity 0.15s, background 0.15s, border-color 0.15s, box-shadow 0.15s; }
-        button:hover:not(:disabled) { opacity: 0.95; transform: translateY(-1px); }
-        button:active:not(:disabled) { transform: translateY(0); }
-        button:disabled { opacity: 0.35; cursor: not-allowed; }
-        a { color: inherit; }
-
-        /* Scrollbar */
-        ::-webkit-scrollbar { width: 10px; height: 10px; }
-        ::-webkit-scrollbar-track { background: ${col.bg}; }
-        ::-webkit-scrollbar-thumb { background: ${col.border}; border-radius: 5px; }
-        ::-webkit-scrollbar-thumb:hover { background: ${col.borderHi}; }
-
-        /* Stat boxes — make numbers bigger, add accent strip + hover */
-        .stat-box {
-          position: relative;
-          overflow: hidden;
-          border-radius: 10px !important;
-          padding: 18px 20px !important;
-        }
-        .stat-box::before {
-          content: "";
-          position: absolute;
-          inset: 0 auto 0 0;
-          width: 3px;
-          background: linear-gradient(180deg, ${col.accent}, transparent);
-          opacity: 0.6;
-        }
-        .stat-box.stat-blue::before { background: linear-gradient(180deg, ${col.blue}, transparent); }
-        .stat-box > div:last-child { font-size: 30px !important; line-height: 1.05; letter-spacing: -0.02em; }
-        .stat-row { gap: 14px !important; }
-
-        /* Cards — softer lift on hover */
-        .clickable-card:hover { border-color: ${col.borderHi} !important; transform: translateY(-1px); box-shadow: 0 8px 28px rgba(0,0,0,0.4); }
-
-        /* Tab buttons larger */
-        .tabs button { font-size: 13.5px !important; padding: 14px 20px !important; }
-
-        /* Section labels gain a soft chip look */
-        .section-label-chip {
-          display: inline-block;
-          padding: 4px 10px;
-          background: ${col.surf2};
-          border: 1px solid ${col.border};
-          border-radius: 999px;
-          font-family: ${mono};
-          font-size: 10px;
-          letter-spacing: 0.18em;
-          text-transform: uppercase;
-          color: ${col.muted2};
-          font-weight: 600;
-          margin-bottom: 14px;
-        }
-
-        /* Pulse for "active today" dot */
-        @keyframes pulse {
-          0%, 100% { box-shadow: 0 0 0 0 ${col.success}55; }
-          50% { box-shadow: 0 0 0 6px ${col.success}00; }
-        }
-        .pulse { animation: pulse 2s infinite; }
-
-        /* Subtle fade-in */
-        @keyframes fadeUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
-        .fade { animation: fadeUp 0.25s ease-out; }
-
-        /* Wider container responsive */
-        @media (max-width: 720px) {
-          .stat-row { gap: 8px !important; }
-          .stat-box { min-width: calc(50% - 4px) !important; padding: 14px 16px !important; }
-          .stat-box > div:last-child { font-size: 22px !important; }
-          .row-split { flex-direction: column !important; }
-        }
-        @media (max-width: 480px) {
-          .stat-box { min-width: 100% !important; }
-        }
-      `}</style>
       {activeRole === "creator" && myCreator && (
         <CreatorDash creator={myCreator}
           videos={videosMap[myCreator.id] || []}
@@ -655,12 +739,40 @@ export default function App() {
           activeRole={activeRole}
           onSwitchRole={setActiveRole} />
       )}
+      {activeRole === "editor" && myEditor && (
+        <EditorDash editor={myEditor}
+          edits={editsMap[myEditor.id] || []}
+          onSave={(e) => saveEdit(myEditor.id, e)}
+          onDelete={(id) => deleteEdit(myEditor.id, id)}
+          onLogout={handleSignOut}
+          availableRoles={availableRoles}
+          activeRole={activeRole}
+          onSwitchRole={setActiveRole} />
+      )}
+      {activeRole === "recruiter" && myRecruiter && (
+        <RecruiterDash recruiter={myRecruiter}
+          reports={recruitMap[myRecruiter.id] || []}
+          hires={hiresMap[myRecruiter.id] || []}
+          onSave={(e) => saveRecruitEOD(myRecruiter.id, e)}
+          onSaveHire={(h) => saveHire(myRecruiter.id, h)}
+          onUpdateHire={(id, patch) => updateHire(myRecruiter.id, id, patch)}
+          onDeleteHire={(id) => deleteHire(myRecruiter.id, id)}
+          onLogout={handleSignOut}
+          availableRoles={availableRoles}
+          activeRole={activeRole}
+          onSwitchRole={setActiveRole} />
+      )}
       {activeRole === "admin" && adminView === "main" && (
         <AdminDash creators={creators} setters={setters} videosMap={videosMap} eodMap={eodMap}
+          editors={editors} recruiters={recruiters} editsMap={editsMap} recruitMap={recruitMap} hiresMap={hiresMap}
           onAddCreator={addCreator} onRemoveCreator={removeCreator}
           onAddSetter={addSetter} onRemoveSetter={removeSetter}
+          onAddEditor={addEditor} onRemoveEditor={removeEditor}
+          onAddRecruiter={addRecruiter} onRemoveRecruiter={removeRecruiter}
           onSelectCreator={(id) => { setFocusId(id); setAdminView("creator-detail"); }}
           onSelectSetter={(id) => { setFocusId(id); setAdminView("setter-detail"); }}
+          onSelectEditor={(id) => { setFocusId(id); setAdminView("editor-detail"); }}
+          onSelectRecruiter={(id) => { setFocusId(id); setAdminView("recruiter-detail"); }}
           onLogout={handleSignOut}
           availableRoles={availableRoles}
           activeRole={activeRole}
@@ -680,6 +792,12 @@ export default function App() {
       )}
       {activeRole === "admin" && adminView === "setter-detail" && focusSetter && (
         <AdminSetterDetail setter={focusSetter} eods={eodMap[focusSetter.id] || []} leads={leadsMap[focusSetter.id] || []} onBack={() => setAdminView("main")} />
+      )}
+      {activeRole === "admin" && adminView === "editor-detail" && focusEditor && (
+        <AdminEditorDetail editor={focusEditor} edits={editsMap[focusEditor.id] || []} onBack={() => setAdminView("main")} />
+      )}
+      {activeRole === "admin" && adminView === "recruiter-detail" && focusRecruiter && (
+        <AdminRecruiterDetail recruiter={focusRecruiter} reports={recruitMap[focusRecruiter.id] || []} hires={hiresMap[focusRecruiter.id] || []} onBack={() => setAdminView("main")} />
       )}
     </>
   );
@@ -926,7 +1044,7 @@ function UnassignedPage({ email, onSignOut, reason }) {
         </div>
         <div style={{ fontFamily: mono, fontSize: 10, letterSpacing: "0.25em", color: col.warn, textTransform: "uppercase", marginBottom: 12 }}>Awaiting Assignment</div>
         <h1 style={{ fontSize: 28, fontWeight: 800, letterSpacing: "-0.02em", marginBottom: 14, lineHeight: 1.2 }}>You're signed in, but not yet assigned a role.</h1>
-        <p style={{ color: col.muted2, fontSize: 15, marginBottom: 8, lineHeight: 1.5 }}>{reason || "Please contact your admin to get linked to your creator or setter profile."}</p>
+        <p style={{ color: col.muted2, fontSize: 15, marginBottom: 8, lineHeight: 1.5 }}>{reason || "Please contact your admin to get linked to your role — creator, setter, editor, or recruiter."}</p>
         <p style={{ color: col.muted, fontSize: 13, marginBottom: 28, fontFamily: mono }}>{email}</p>
         <button style={btnG} onClick={onSignOut}>Sign out</button>
       </div>
@@ -1586,8 +1704,9 @@ function SetterEODCard({ eod }) {
 }
 
 // ─── ADMIN DASHBOARD ─────────────────────────────────────────────────────────
-function AdminDash({ creators, setters, videosMap, eodMap, onAddCreator, onRemoveCreator, onAddSetter, onRemoveSetter, onSelectCreator, onSelectSetter, onLogout, availableRoles, activeRole, onSwitchRole, profilesVersion = 0, initialTab = "users" }) {
+function AdminDash({ creators, setters, videosMap, eodMap, editors = [], recruiters = [], editsMap = {}, recruitMap = {}, hiresMap = {}, onAddCreator, onRemoveCreator, onAddSetter, onRemoveSetter, onAddEditor, onRemoveEditor, onAddRecruiter, onRemoveRecruiter, onSelectCreator, onSelectSetter, onSelectEditor, onSelectRecruiter, onLogout, availableRoles, activeRole, onSwitchRole, profilesVersion = 0, initialTab = "users" }) {
   const [tab, setTab] = useState(initialTab);
+  const allHires = Object.values(hiresMap).flat();
 
   return (
     <div style={S.page}>
@@ -1607,26 +1726,30 @@ function AdminDash({ creators, setters, videosMap, eodMap, onAddCreator, onRemov
           {[
             { id: "creators", label: `Creators (${creators.length})`, color: col.accent },
             { id: "setters", label: `Setters (${setters.length})`, color: col.blue },
+            { id: "editors", label: `Editors (${editors.length})`, color: col.magenta },
+            { id: "recruiters", label: `Recruiters (${recruiters.length})`, color: col.cyan },
             { id: "users", label: "Users", color: col.warn },
           ].map(t => (
             <button key={t.id} onClick={() => setTab(t.id)} style={{
               background: "none", border: "none", color: tab === t.id ? t.color : col.muted,
               fontFamily: font, fontWeight: 700, fontSize: 13, padding: "12px 18px", cursor: "pointer",
-              borderBottom: `2px solid ${tab === t.id ? t.color : "transparent"}`, marginBottom: -1,
+              borderBottom: `2px solid ${tab === t.id ? t.color : "transparent"}`, marginBottom: -1, whiteSpace: "nowrap",
             }}>{t.label}</button>
           ))}
         </div>
 
         {tab === "creators" && <AdminCreatorsView creators={creators} videosMap={videosMap} onAdd={onAddCreator} onRemove={onRemoveCreator} onSelect={onSelectCreator} />}
         {tab === "setters" && <AdminSettersView setters={setters} eodMap={eodMap} onAdd={onAddSetter} onRemove={onRemoveSetter} onSelect={onSelectSetter} />}
-        {tab === "users" && <AdminUsersView creators={creators} setters={setters} onAddCreator={onAddCreator} onAddSetter={onAddSetter} externalVersion={profilesVersion} />}
+        {tab === "editors" && <AdminEditorsView editors={editors} editsMap={editsMap} onRemove={onRemoveEditor} onSelect={onSelectEditor} />}
+        {tab === "recruiters" && <AdminRecruitersView recruiters={recruiters} recruitMap={recruitMap} hires={allHires} onRemove={onRemoveRecruiter} onSelect={onSelectRecruiter} />}
+        {tab === "users" && <AdminUsersView creators={creators} setters={setters} editors={editors} recruiters={recruiters} onAddCreator={onAddCreator} onAddSetter={onAddSetter} onAddEditor={onAddEditor} onAddRecruiter={onAddRecruiter} externalVersion={profilesVersion} />}
       </div>
     </div>
   );
 }
 
 // ─── ADMIN USERS VIEW ────────────────────────────────────────────────────────
-function AdminUsersView({ creators, setters, onAddCreator, onAddSetter, externalVersion = 0 }) {
+function AdminUsersView({ creators, setters, editors = [], recruiters = [], onAddCreator, onAddSetter, onAddEditor, onAddRecruiter, externalVersion = 0 }) {
   const [profiles, setProfiles] = useState(null);
   const [invites, setInvites] = useState(null);
   const [editing, setEditing] = useState(null); // profile id OR "invite:<email>" OR "new"
@@ -1648,14 +1771,16 @@ function AdminUsersView({ creators, setters, onAddCreator, onAddSetter, external
     if (p.isAdmin) out.push({ key: "admin", label: "Admin", color: col.warn });
     if (p.creatorId) out.push({ key: "creator", label: "Creator", color: col.accent, entityName: creators.find(c => c.id === p.creatorId)?.name || "(deleted)" });
     if (p.setterId) out.push({ key: "setter", label: "Setter", color: col.blue, entityName: setters.find(s => s.id === p.setterId)?.name || "(deleted)" });
+    if (p.editorId) out.push({ key: "editor", label: "Editor", color: col.magenta, entityName: editors.find(e => e.id === p.editorId)?.name || "(deleted)" });
+    if (p.recruiterId) out.push({ key: "recruiter", label: "Recruiter", color: col.cyan, entityName: recruiters.find(r => r.id === p.recruiterId)?.name || "(deleted)" });
     return out;
   };
 
   if (err) return <div style={{ ...S.card, padding: 20, color: col.danger }}>Couldn't load users: {err}</div>;
   if (!profiles || !invites) return <div style={{ ...S.card, padding: 30, color: col.muted, textAlign: "center" }}>Loading…</div>;
 
-  const unassigned = profiles.filter(p => !p.isAdmin && !p.creatorId && !p.setterId);
-  const assigned = profiles.filter(p => p.isAdmin || p.creatorId || p.setterId);
+  const unassigned = profiles.filter(p => !p.isAdmin && !p.creatorId && !p.setterId && !p.editorId && !p.recruiterId);
+  const assigned = profiles.filter(p => p.isAdmin || p.creatorId || p.setterId || p.editorId || p.recruiterId);
 
   const handleDeleteInvite = async (email) => {
     if (!window.confirm(`Cancel invite for ${email}?`)) return;
@@ -1671,8 +1796,8 @@ function AdminUsersView({ creators, setters, onAddCreator, onAddSetter, external
       </div>
 
       {editing === "new" && (
-        <InviteForm creators={creators} setters={setters}
-          onAddCreator={onAddCreator} onAddSetter={onAddSetter}
+        <InviteForm creators={creators} setters={setters} editors={editors} recruiters={recruiters}
+          onAddCreator={onAddCreator} onAddSetter={onAddSetter} onAddEditor={onAddEditor} onAddRecruiter={onAddRecruiter}
           onCancel={() => setEditing(null)}
           onSaved={() => { setEditing(null); refresh(); }} />
       )}
@@ -1686,6 +1811,8 @@ function AdminUsersView({ creators, setters, onAddCreator, onAddSetter, external
             if (i.isAdmin) iRoles.push({ label: "Admin", color: col.warn });
             if (i.creatorId) iRoles.push({ label: "Creator", color: col.accent, entityName: creators.find(c => c.id === i.creatorId)?.name });
             if (i.setterId) iRoles.push({ label: "Setter", color: col.blue, entityName: setters.find(s => s.id === i.setterId)?.name });
+            if (i.editorId) iRoles.push({ label: "Editor", color: col.magenta, entityName: editors.find(e => e.id === i.editorId)?.name });
+            if (i.recruiterId) iRoles.push({ label: "Recruiter", color: col.cyan, entityName: recruiters.find(r => r.id === i.recruiterId)?.name });
             return (
               <div key={i.email} style={{ ...S.card, display: "flex", alignItems: "center", gap: 12, padding: "14px 18px" }}>
                 <div style={{ width: 8, height: 8, borderRadius: "50%", background: col.warn, flexShrink: 0 }} />
@@ -1714,8 +1841,8 @@ function AdminUsersView({ creators, setters, onAddCreator, onAddSetter, external
       {unassigned.length === 0
         ? <div style={{ ...S.card, padding: 24, textAlign: "center", color: col.muted, marginBottom: 28 }}>Everyone's assigned. ✓</div>
         : unassigned.map(p => (
-          <UserRow key={p.id} profile={p} creators={creators} setters={setters}
-            onAddCreator={onAddCreator} onAddSetter={onAddSetter}
+          <UserRow key={p.id} profile={p} creators={creators} setters={setters} editors={editors} recruiters={recruiters}
+            onAddCreator={onAddCreator} onAddSetter={onAddSetter} onAddEditor={onAddEditor} onAddRecruiter={onAddRecruiter}
             editing={editing === p.id}
             onEdit={() => setEditing(p.id)}
             onCancel={() => setEditing(null)}
@@ -1729,8 +1856,8 @@ function AdminUsersView({ creators, setters, onAddCreator, onAddSetter, external
       {assigned.length === 0
         ? <div style={{ ...S.card, padding: 24, textAlign: "center", color: col.muted }}>Nobody assigned yet.</div>
         : assigned.map(p => (
-          <UserRow key={p.id} profile={p} creators={creators} setters={setters}
-            onAddCreator={onAddCreator} onAddSetter={onAddSetter}
+          <UserRow key={p.id} profile={p} creators={creators} setters={setters} editors={editors} recruiters={recruiters}
+            onAddCreator={onAddCreator} onAddSetter={onAddSetter} onAddEditor={onAddEditor} onAddRecruiter={onAddRecruiter}
             editing={editing === p.id}
             onEdit={() => setEditing(p.id)}
             onCancel={() => setEditing(null)}
@@ -1744,7 +1871,7 @@ function AdminUsersView({ creators, setters, onAddCreator, onAddSetter, external
 }
 
 // ─── INVITE FORM (add user by email) ─────────────────────────────────────────
-function InviteForm({ creators, setters, onAddCreator, onAddSetter, onCancel, onSaved }) {
+function InviteForm({ creators, setters, editors, recruiters, onAddCreator, onAddSetter, onAddEditor, onAddRecruiter, onCancel, onSaved }) {
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
   const [assigner, setAssigner] = useState({ resolve: null, valid: true, anySelected: false });
@@ -1783,8 +1910,8 @@ function InviteForm({ creators, setters, onAddCreator, onAddSetter, onCancel, on
       </div>
 
       <RoleAssignmentFields
-        onAddCreator={onAddCreator} onAddSetter={onAddSetter}
-        value={{ isAdmin: false, creatorId: null, setterId: null }}
+        onAddCreator={onAddCreator} onAddSetter={onAddSetter} onAddEditor={onAddEditor} onAddRecruiter={onAddRecruiter}
+        value={{ isAdmin: false, creatorId: null, setterId: null, editorId: null, recruiterId: null }}
         onChange={setAssigner}
         displayName={effectiveName} />
 
@@ -1807,20 +1934,24 @@ function InviteForm({ creators, setters, onAddCreator, onAddSetter, onCancel, on
 // Role assignment editor — checkbox model only, no entity picking.
 // Checking Creator/Setter auto-creates a fresh entity (named from displayName).
 // Admin role requires typing "admin" in a confirmation box to avoid accidents.
-function RoleAssignmentFields({ onAddCreator, onAddSetter, value, onChange, displayName }) {
+function RoleAssignmentFields({ onAddCreator, onAddSetter, onAddEditor, onAddRecruiter, value, onChange, displayName }) {
   const [isAdmin, setIsAdmin] = useState(value.isAdmin);
   const [isCreator, setIsCreator] = useState(!!value.creatorId);
   const [isSetter, setIsSetter] = useState(!!value.setterId);
+  const [isEditor, setIsEditor] = useState(!!value.editorId);
+  const [isRecruiter, setIsRecruiter] = useState(!!value.recruiterId);
   const [adminConfirm, setAdminConfirm] = useState("");
 
-  // Resolve to final {isAdmin, creatorId, setterId}. Entities are created only
-  // when newly checked (no entity exists yet); existing links are preserved.
+  // Resolve to final {isAdmin, creatorId, setterId, editorId, recruiterId}. Entities are
+  // created only when newly checked (no entity exists yet); existing links are preserved.
   const resolve = async () => {
     if (isAdmin && !value.isAdmin && adminConfirm.trim().toLowerCase() !== "admin") {
       throw new Error('Type "admin" in the confirmation box to grant admin role.');
     }
     let creatorId = null;
     let setterId = null;
+    let editorId = null;
+    let recruiterId = null;
     if (isCreator) {
       if (value.creatorId) {
         creatorId = value.creatorId; // preserve existing link
@@ -1841,19 +1972,39 @@ function RoleAssignmentFields({ onAddCreator, onAddSetter, value, onChange, disp
         setterId = ns.id;
       }
     }
-    return { isAdmin, creatorId, setterId };
+    if (isEditor) {
+      if (value.editorId) {
+        editorId = value.editorId;
+      } else {
+        const name = (displayName || "").trim();
+        if (!name) throw new Error("Display name required to create an editor entity.");
+        const ne = await onAddEditor(name);
+        editorId = ne.id;
+      }
+    }
+    if (isRecruiter) {
+      if (value.recruiterId) {
+        recruiterId = value.recruiterId;
+      } else {
+        const name = (displayName || "").trim();
+        if (!name) throw new Error("Display name required to create a recruiter entity.");
+        const nr = await onAddRecruiter(name);
+        recruiterId = nr.id;
+      }
+    }
+    return { isAdmin, creatorId, setterId, editorId, recruiterId };
   };
 
   const needsAdminConfirm = isAdmin && !value.isAdmin;
   const adminConfirmed = !needsAdminConfirm || adminConfirm.trim().toLowerCase() === "admin";
-  const needsDisplayName = (isCreator && !value.creatorId) || (isSetter && !value.setterId);
+  const needsDisplayName = (isCreator && !value.creatorId) || (isSetter && !value.setterId) || (isEditor && !value.editorId) || (isRecruiter && !value.recruiterId);
   const hasDisplayName = !needsDisplayName || (displayName || "").trim().length > 0;
   const valid = adminConfirmed && hasDisplayName;
-  const anySelected = isAdmin || isCreator || isSetter;
+  const anySelected = isAdmin || isCreator || isSetter || isEditor || isRecruiter;
 
   useEffect(() => {
     onChange({ resolve, valid, anySelected });
-  }, [isAdmin, isCreator, isSetter, adminConfirm, displayName]);
+  }, [isAdmin, isCreator, isSetter, isEditor, isRecruiter, adminConfirm, displayName]);
 
   return (
     <div>
@@ -1867,6 +2018,14 @@ function RoleAssignmentFields({ onAddCreator, onAddSetter, value, onChange, disp
       <CheckboxRow label="Setter" color={col.blue} checked={isSetter} onChange={setIsSetter}
         desc={value.setterId ? "Already linked — uncheck to unlink." : "Creates a fresh setter profile under their display name."} />
 
+      {/* Video Editor */}
+      <CheckboxRow label="Video Editor" color={col.magenta} checked={isEditor} onChange={setIsEditor}
+        desc={value.editorId ? "Already linked — uncheck to unlink." : "Creates a fresh editor profile under their display name."} />
+
+      {/* Recruiter */}
+      <CheckboxRow label="Recruiter" color={col.cyan} checked={isRecruiter} onChange={setIsRecruiter}
+        desc={value.recruiterId ? "Already linked — uncheck to unlink." : "Creates a fresh recruiter profile under their display name."} />
+
       {/* Display name warning */}
       {needsDisplayName && !hasDisplayName && (
         <div style={{ marginLeft: 26, marginTop: -4, marginBottom: 8, fontSize: 12, color: col.warn, lineHeight: 1.5 }}>
@@ -1876,7 +2035,7 @@ function RoleAssignmentFields({ onAddCreator, onAddSetter, value, onChange, disp
 
       {/* Admin (gated) */}
       <CheckboxRow label="Admin" color={col.warn} checked={isAdmin} onChange={(v) => { setIsAdmin(v); if (!v) setAdminConfirm(""); }}
-        desc="Full team control — see + edit every creator, setter, and user." />
+        desc="Full team control — see + edit every creator, setter, editor, recruiter, and user." />
 
       {needsAdminConfirm && (
         <div style={{ marginLeft: 26, marginTop: 6, marginBottom: 6 }}>
@@ -1885,7 +2044,7 @@ function RoleAssignmentFields({ onAddCreator, onAddSetter, value, onChange, disp
               <span style={{ fontSize: 14 }}>⚠</span> Granting admin = full access
             </div>
             <div style={{ fontSize: 12, color: col.text, lineHeight: 1.5 }}>
-              Admins can view & edit ALL data — every creator's videos, every setter's leads + EODs, the full pipeline. They can also assign/remove other admins (including yourself). Only do this for people you fully trust to operate the team.
+              Admins can view & edit ALL data — every creator's videos, every setter's leads + EODs, every editor's output, every recruiter's pipeline + hires. They can also assign/remove other admins (including yourself). Only do this for people you fully trust to operate the team.
             </div>
           </div>
           <label style={{ ...S.label, color: col.danger }}>Type <strong>admin</strong> to confirm</label>
@@ -1920,7 +2079,7 @@ function CheckboxRow({ label, color, checked, onChange, desc }) {
   );
 }
 
-function UserRow({ profile, creators, setters, onAddCreator, onAddSetter, editing, onEdit, onCancel, onSaved, rolesOf }) {
+function UserRow({ profile, creators, setters, editors, recruiters, onAddCreator, onAddSetter, onAddEditor, onAddRecruiter, editing, onEdit, onCancel, onSaved, rolesOf }) {
   const [name, setName] = useState(profile.name || "");
   const [assigner, setAssigner] = useState({ resolve: null, valid: true, anySelected: false });
   const [busy, setBusy] = useState(false);
@@ -1957,8 +2116,8 @@ function UserRow({ profile, creators, setters, onAddCreator, onAddSetter, editin
         </div>
 
         <RoleAssignmentFields
-          onAddCreator={onAddCreator} onAddSetter={onAddSetter}
-          value={{ isAdmin: profile.isAdmin, creatorId: profile.creatorId, setterId: profile.setterId }}
+          onAddCreator={onAddCreator} onAddSetter={onAddSetter} onAddEditor={onAddEditor} onAddRecruiter={onAddRecruiter}
+          value={{ isAdmin: profile.isAdmin, creatorId: profile.creatorId, setterId: profile.setterId, editorId: profile.editorId, recruiterId: profile.recruiterId }}
           onChange={setAssigner}
           displayName={name.trim() || profile.email?.split("@")[0] || ""} />
 
@@ -1984,7 +2143,7 @@ function UserRow({ profile, creators, setters, onAddCreator, onAddSetter, editin
       </div>
       <div style={{ display: "flex", gap: 4, flexWrap: "wrap", justifyContent: "flex-end" }}>
         {roles.length === 0
-          ? <span style={{ padding: "4px 10px", borderRadius: 3, fontSize: 10, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", background: col.muted + "22", color: col.muted, border: `1px solid ${col.muted}44` }}>Unassigned</span>
+          ? <span style={{ padding: "4px 10px", borderRadius: 3, fontSize: 10, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", background: "color-mix(in srgb, var(--muted) 14%, transparent)", color: col.muted, border: "1px solid color-mix(in srgb, var(--muted) 28%, transparent)" }}>Unassigned</span>
           : roles.map(r => (
             <span key={r.key} style={{
               padding: "4px 10px", borderRadius: 3, fontSize: 10, fontWeight: 700,
@@ -2567,6 +2726,971 @@ function AdminSetterDetail({ setter, eods, leads, onBack }) {
           ? <div style={{ ...S.card, textAlign: "center", color: col.muted, padding: 36 }}>No EOD reports yet.</div>
           : [...eods].sort((a, b) => b.date.localeCompare(a.date)).map(e => <SetterEODCard key={e.date} eod={e} />)
         }
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SHARED HELPERS FOR EDITOR / RECRUITER / HIRE VIEWS
+// ═══════════════════════════════════════════════════════════════════════════
+const editCnt = (e) => parseInt(e.count) || 1;
+
+const editBadge = (c) => ({
+  display: "inline-block", padding: "2px 7px", borderRadius: 3, fontSize: 9,
+  fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase",
+  background: c + "22", color: c, border: `1px solid ${c}44`,
+});
+
+const tabBtn = (active, color) => ({
+  background: "none", border: "none", color: active ? color : col.muted,
+  fontFamily: font, fontWeight: 700, fontSize: 13, padding: "12px 18px", cursor: "pointer",
+  borderBottom: `2px solid ${active ? color : "transparent"}`, marginBottom: -1, whiteSpace: "nowrap",
+});
+
+function StatBox({ label, value, color, hint }) {
+  return (
+    <div className="stat-box" style={{ flex: 1, minWidth: 100, background: col.surf, border: `1px solid ${col.border}`, borderRadius: 6, padding: "16px 18px" }}>
+      <div style={{ fontFamily: mono, fontSize: 10, color: col.muted, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 6 }}>{label}</div>
+      <div style={{ fontSize: 22, fontWeight: 800, fontFamily: mono, color: color || col.text }}>{value}</div>
+      {hint && <div style={{ fontSize: 10, color: col.muted, marginTop: 4 }}>{hint}</div>}
+    </div>
+  );
+}
+
+function DashHeader({ label, labelColor, name, availableRoles, activeRole, onSwitchRole, onLogout }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 28, flexWrap: "wrap", gap: 12 }}>
+      <div>
+        <div style={{ fontFamily: mono, fontSize: 10, letterSpacing: "0.2em", color: labelColor || col.muted, textTransform: "uppercase", marginBottom: 8 }}>{label}</div>
+        <h1 style={{ fontSize: 26, fontWeight: 800, letterSpacing: "-0.02em" }}>{name}</h1>
+      </div>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <RoleSwitcher availableRoles={availableRoles} activeRole={activeRole} onSwitchRole={onSwitchRole} />
+        <button style={{ ...btnG, padding: "8px 16px", fontSize: 12 }} onClick={onLogout}>Sign out</button>
+      </div>
+    </div>
+  );
+}
+
+function DetailLine({ label, value }) {
+  return (
+    <div style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
+      <span style={{ fontFamily: mono, fontSize: 9, color: col.muted, letterSpacing: "0.1em", textTransform: "uppercase", width: 50 }}>{label}</span>
+      <span style={{ fontFamily: mono, fontSize: 13, color: col.text }}>{value}</span>
+    </div>
+  );
+}
+
+function TypeBars({ data, color }) {
+  const max = Math.max(...data.map(t => t.value), 1);
+  return data.every(t => t.value === 0)
+    ? <div style={{ color: col.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>No data yet.</div>
+    : data.map(t => (
+      <div key={t.label} style={{ marginBottom: 10 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color }}>{t.label}</span>
+          <span style={{ fontFamily: mono, fontSize: 12, color: col.muted2 }}>{t.value} vids</span>
+        </div>
+        <div style={{ height: 6, background: col.surf2, borderRadius: 3, overflow: "hidden" }}>
+          <div style={{ height: "100%", width: `${(t.value / max) * 100}%`, background: color, borderRadius: 3 }} />
+        </div>
+      </div>
+    ));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VIDEO EDITOR DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════════
+function EditorDash({ editor, edits, onSave, onDelete, onLogout, availableRoles, activeRole, onSwitchRole }) {
+  const [tab, setTab] = useState("overview");
+  const [editing, setEditing] = useState(null);
+  const [adding, setAdding] = useState(false);
+
+  const cutoff = daysAgo(30);
+  const last30 = edits.filter(e => (e.editDate || "") >= cutoff);
+  const totalVids = last30.reduce((s, e) => s + editCnt(e), 0);
+  const totalMin = last30.reduce((s, e) => s + (parseInt(e.timeMin) || 0), 0);
+  const clients = last30.filter(e => e.editedFor === "Clients").reduce((s, e) => s + editCnt(e), 0);
+  const outscript = last30.filter(e => e.editedFor === "OutScript").reduce((s, e) => s + editCnt(e), 0);
+  const byType = EDIT_TYPES.map(t => ({ label: t, value: last30.filter(e => e.type === t).reduce((s, e) => s + editCnt(e), 0) }));
+  const dailyVids = useMemo(() => dailyBucket(edits, e => e.editDate, e => editCnt(e), 30), [edits]);
+
+  return (
+    <div style={S.page}>
+      <div style={S.inner}>
+        <DashHeader label="Video Editor Dashboard" labelColor={col.magenta} name={editor.name}
+          availableRoles={availableRoles} activeRole={activeRole} onSwitchRole={onSwitchRole} onLogout={onLogout} />
+
+        <div className="tabs" style={{ display: "flex", borderBottom: `1px solid ${col.border}`, marginBottom: 24, gap: 4, overflowX: "auto" }}>
+          {[{ id: "overview", label: "Overview" }, { id: "library", label: `Library (${edits.length})` }].map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)} style={tabBtn(tab === t.id, col.magenta)}>{t.label}</button>
+          ))}
+        </div>
+
+        {tab === "overview" && (
+          <div>
+            <div style={S.sectionLabel}>Last 30 Days</div>
+            <div className="stat-row" style={{ display: "flex", gap: 10, marginBottom: 24, flexWrap: "wrap" }}>
+              <StatBox label="Videos Edited" value={totalVids} color={col.magenta} />
+              <StatBox label="Time Spent" value={minToStr(totalMin)} color={col.warn} />
+              <StatBox label="Avg / Video" value={totalVids ? minToStr(Math.round(totalMin / totalVids)) : "0m"} />
+              <StatBox label="For Clients" value={clients} color={col.accent} />
+              <StatBox label="For OutScript" value={outscript} color={col.blue} />
+            </div>
+
+            <div style={S.sectionLabel}>Daily Output (30d)</div>
+            <div style={{ ...S.card, padding: "22px 24px", marginBottom: 24 }}>
+              <TrendBars data={dailyVids} color={col.magenta} height={140} format={(v) => v} label="Videos edited per day" />
+            </div>
+
+            <div style={S.sectionLabel}>By Type (30d)</div>
+            <div style={{ ...S.card, padding: "20px 22px" }}><TypeBars data={byType} color={col.magenta} /></div>
+
+            <div style={{ ...S.card, textAlign: "center", padding: 24, marginTop: 24 }}>
+              <button style={{ ...btnA, background: col.magenta, boxShadow: `0 4px 24px ${col.glowMagenta}` }} onClick={() => { setTab("library"); setAdding(true); }}>+ Log Edited Video(s)</button>
+            </div>
+          </div>
+        )}
+
+        {tab === "library" && (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <div style={{ ...S.sectionLabel, marginBottom: 0 }}>Edit Log</div>
+              <button style={{ ...btnSm, color: col.magenta, borderColor: col.magenta + "55" }} onClick={() => setAdding(true)}>+ Log Edit</button>
+            </div>
+
+            {adding && <EditorForm edit={null} onSave={async (e) => { await onSave(e); setAdding(false); }} onCancel={() => setAdding(false)} />}
+
+            {edits.length === 0 && !adding
+              ? <div style={{ ...S.card, textAlign: "center", color: col.muted, padding: 40 }}>
+                  <div style={{ marginBottom: 12 }}>No edits logged yet.</div>
+                  <button style={{ ...btnA, background: col.magenta }} onClick={() => setAdding(true)}>Log your first edit</button>
+                </div>
+              : [...edits].sort((a, b) => (b.editDate || "").localeCompare(a.editDate || "")).map(e => (
+                editing === e.id
+                  ? <EditorForm key={e.id} edit={e}
+                      onSave={async (u) => { await onSave(u); setEditing(null); }}
+                      onCancel={() => setEditing(null)}
+                      onDelete={async () => { if (window.confirm("Delete this edit?")) { await onDelete(e.id); setEditing(null); } }} />
+                  : <EditRow key={e.id} edit={e} onClick={() => setEditing(e.id)} />
+              ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EditRow({ edit, onClick }) {
+  return (
+    <div style={{ ...S.card, display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }} onClick={onClick} className="clickable-card">
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5, flexWrap: "wrap" }}>
+          <span style={editBadge(col.magenta)}>{edit.type}</span>
+          <span style={editBadge(edit.editedFor === "Clients" ? col.accent : col.blue)}>{edit.editedFor}</span>
+          {editCnt(edit) > 1 && <span style={editBadge(col.warn)}>{editCnt(edit)} videos</span>}
+          <span style={{ fontSize: 11, color: col.muted }}>{fmtDate(edit.editDate)}</span>
+        </div>
+        <a href={edit.url} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()} style={{ fontSize: 11, fontFamily: mono, color: col.muted2, textDecoration: "none", display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{edit.url}</a>
+      </div>
+      <div style={{ textAlign: "right", flexShrink: 0 }}>
+        <div style={{ fontFamily: mono, fontSize: 14, fontWeight: 700, color: col.warn }}>{minToStr(edit.timeMin)}</div>
+        <div style={{ fontSize: 10, color: col.muted }}>tap to edit</div>
+      </div>
+    </div>
+  );
+}
+
+function EditorForm({ edit, onSave, onCancel, onDelete }) {
+  const [url, setUrl] = useState(edit?.url || "");
+  const [type, setType] = useState(edit?.type || EDIT_TYPES[0]);
+  const [editedFor, setEditedFor] = useState(edit?.editedFor || EDIT_FOR[0]);
+  const [time, setTime] = useState(edit?.timeRaw || "");
+  const [editDate, setEditDate] = useState(edit?.editDate || todayStr());
+  const [mode, setMode] = useState((parseInt(edit?.count) || 1) > 1 ? "Custom" : "Single");
+  const [count, setCount] = useState((parseInt(edit?.count) || 1) > 1 ? String(edit.count) : "");
+  const [busy, setBusy] = useState(false);
+  const editMode = !!edit;
+
+  const effectiveCount = mode === "Single" ? 1 : parseInt(count) || 0;
+  const valid = url.trim() && effectiveCount > 0;
+
+  const handleSave = async () => {
+    if (!valid) return;
+    setBusy(true);
+    await onSave({ ...(edit || {}), url: url.trim(), type, editedFor, timeRaw: time.trim(), timeMin: timeToMin(time), count: effectiveCount, editDate });
+    setBusy(false);
+  };
+
+  return (
+    <div style={{ ...S.card, background: col.surf2, border: `1px solid ${col.magenta}66`, padding: "20px 22px" }}>
+      <div style={{ fontFamily: mono, fontSize: 10, letterSpacing: "0.15em", color: col.magenta, textTransform: "uppercase", marginBottom: 14 }}>{editMode ? "Edit Entry" : "Log Edited Video(s)"}</div>
+
+      <div style={{ marginBottom: 12 }}>
+        <label style={S.label}>Video / folder link</label>
+        <input type="url" placeholder="https://drive.google.com/..." style={S.input} value={url} onChange={e => setUrl(e.target.value)} autoFocus={!editMode} />
+      </div>
+
+      <div className="row-split" style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+        <div style={{ flex: 1 }}>
+          <label style={S.label}>How many videos in this link?</label>
+          <select style={S.select} value={mode} onChange={e => setMode(e.target.value)}>{["Single", "Custom"].map(o => <option key={o}>{o}</option>)}</select>
+        </div>
+        {mode === "Custom" && (
+          <div style={{ flex: 1 }}>
+            <label style={S.label}>Exact number of videos</label>
+            <input type="number" placeholder="e.g. 7" style={S.input} value={count} onChange={e => setCount(e.target.value)} />
+          </div>
+        )}
+      </div>
+
+      {mode === "Custom" && (
+        <div style={{ marginBottom: 12, background: "rgba(255,204,0,0.08)", border: `1px solid ${col.warn}55`, borderRadius: 8, padding: "11px 13px", fontSize: 12, color: col.warn, lineHeight: 1.5 }}>
+          ⚠ Put the <b>exact</b> number of videos in this folder — how many you added today into this one link. This gets checked against the folder.
+        </div>
+      )}
+
+      <div className="row-split" style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+        <div style={{ flex: 1 }}><label style={S.label}>Type</label><select style={S.select} value={type} onChange={e => setType(e.target.value)}>{EDIT_TYPES.map(t => <option key={t}>{t}</option>)}</select></div>
+        <div style={{ flex: 1 }}><label style={S.label}>Edited for</label><select style={S.select} value={editedFor} onChange={e => setEditedFor(e.target.value)}>{EDIT_FOR.map(t => <option key={t}>{t}</option>)}</select></div>
+      </div>
+
+      <div className="row-split" style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+        <div style={{ flex: 1 }}><label style={S.label}>Editing time (e.g. 45m, 1.5h)</label><input style={S.input} placeholder="45m" value={time} onChange={e => setTime(e.target.value)} /></div>
+        <div style={{ flex: 1 }}><label style={S.label}>Date</label><input type="date" style={S.input} value={editDate} onChange={e => setEditDate(e.target.value)} /></div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, justifyContent: "space-between", flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button style={{ ...btnA, background: col.magenta, boxShadow: `0 4px 24px ${col.glowMagenta}` }} onClick={handleSave} disabled={busy || !valid}>{busy ? "Saving..." : editMode ? "Update" : (mode === "Custom" && effectiveCount > 1 ? `Add ${effectiveCount} videos` : "Add Edit")}</button>
+          <button style={btnG} onClick={onCancel}>Cancel</button>
+        </div>
+        {editMode && onDelete && <button style={btnDel} onClick={onDelete}>Delete</button>}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RECRUITER DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════════
+function recruitPlatformStats(reports) {
+  return RECRUIT_PLATFORMS.map(p => {
+    let groups = 0, apps = 0, onboarded = 0, firstVideo = 0;
+    reports.forEach(r => {
+      const d = r.platforms?.[p];
+      if (d) {
+        groups += parseInt(d.groups) || 0;
+        apps += parseInt(d.applications) || 0;
+        onboarded += parseInt(d.onboarded) || 0;
+        firstVideo += parseInt(d.firstVideo) || 0;
+      }
+    });
+    return { platform: p, groups, apps, onboarded, firstVideo,
+      onboardPerGroup: groups ? onboarded / groups : 0, appsPerGroup: groups ? apps / groups : 0 };
+  }).filter(s => s.groups > 0 || s.apps > 0);
+}
+
+function BestPlatform({ best, ranked }) {
+  const maxApps = Math.max(1, ...ranked.map(s => s.apps));
+  return (
+    <>
+      <div style={S.sectionLabel}>Best Performing Platform (30d)</div>
+      <div style={{ ...S.card, padding: "20px 22px", marginBottom: 16 }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 24, fontWeight: 800, color: RECRUIT_PLATFORM_COLORS[best.platform] || col.cyan, letterSpacing: "-0.02em" }}>{best.platform}</span>
+          <span style={{ fontFamily: mono, fontSize: 12, color: col.muted2 }}>{best.onboardPerGroup.toFixed(2)} onboards/group · {best.appsPerGroup.toFixed(1)} apps/group</span>
+        </div>
+        <div style={{ fontSize: 12, color: col.muted, marginTop: 8, lineHeight: 1.5 }}>Ranked by how many people you actually onboard per group you post in — return per unit of effort, not raw volume.</div>
+      </div>
+      <div style={S.sectionLabel}>Platform Comparison (30d)</div>
+      <div style={{ marginBottom: 24 }}>
+        {ranked.map((s, i) => {
+          const cc = RECRUIT_PLATFORM_COLORS[s.platform] || col.cyan;
+          return (
+            <div key={s.platform} style={{ ...S.card, padding: "14px 18px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontFamily: mono, fontSize: 12, fontWeight: 800, color: i === 0 ? col.warn : col.muted }}>#{i + 1}</span>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: cc }}>{s.platform}</span>
+                </div>
+                <span style={{ fontFamily: mono, fontSize: 11, color: col.accent }}>{s.onboardPerGroup.toFixed(2)} onb/group</span>
+              </div>
+              <div style={{ height: 6, background: col.surf2, borderRadius: 4, overflow: "hidden", marginBottom: 8 }}>
+                <div style={{ width: `${(s.apps / maxApps) * 100}%`, height: "100%", background: cc }} />
+              </div>
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontFamily: mono, fontSize: 12 }}>
+                <span style={{ color: col.muted2 }}>{s.groups} groups</span>
+                <span style={{ color: col.blue }}>{s.apps} apps</span>
+                <span style={{ color: col.accent }}>{s.onboarded} onboarded</span>
+                <span style={{ color: col.magenta }}>{s.firstVideo} 1st-vid</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
+function RecruiterDash({ recruiter, reports, hires, onSave, onSaveHire, onUpdateHire, onDeleteHire, onLogout, availableRoles, activeRole, onSwitchRole }) {
+  const [tab, setTab] = useState("overview");
+
+  const cutoff = daysAgo(30);
+  const last30 = reports.filter(r => (r.date || "") >= cutoff);
+  const t = {
+    groups: last30.reduce((s, r) => s + eodTotal(r, "groups"), 0),
+    apps: last30.reduce((s, r) => s + eodTotal(r, "applications"), 0),
+    onboarded: last30.reduce((s, r) => s + eodTotal(r, "onboarded"), 0),
+    firstVideo: last30.reduce((s, r) => s + eodTotal(r, "firstVideo"), 0),
+    reposters: last30.reduce((s, r) => s + eodTotal(r, "reposters"), 0),
+  };
+  const trial = hires.filter(h => h.status === "Trial").length;
+  const hired = hires.filter(h => h.status === "Hired").length;
+  const dailyApps = useMemo(() => dailyBucket(reports, r => r.date, r => eodTotal(r, "applications"), 30), [reports]);
+  const dailyOnb = useMemo(() => dailyBucket(reports, r => r.date, r => eodTotal(r, "onboarded"), 30), [reports]);
+  const platStats = recruitPlatformStats(last30);
+  const ranked = [...platStats].sort((a, b) => b.onboardPerGroup - a.onboardPerGroup || b.onboarded - a.onboarded);
+  const best = ranked[0];
+
+  const tabs = [
+    { id: "overview", label: "Overview" },
+    { id: "submit", label: "Submit EOD" },
+    { id: "hires", label: `Hires (${hires.length})` },
+    { id: "history", label: `History (${reports.length})` },
+  ];
+
+  return (
+    <div style={S.page}>
+      <div style={S.inner}>
+        <DashHeader label="Recruiter Dashboard" labelColor={col.cyan} name={recruiter.name}
+          availableRoles={availableRoles} activeRole={activeRole} onSwitchRole={onSwitchRole} onLogout={onLogout} />
+
+        <div className="tabs" style={{ display: "flex", borderBottom: `1px solid ${col.border}`, marginBottom: 24, gap: 4, overflowX: "auto" }}>
+          {tabs.map(tb => <button key={tb.id} onClick={() => setTab(tb.id)} style={tabBtn(tab === tb.id, col.cyan)}>{tb.label}</button>)}
+        </div>
+
+        {tab === "overview" && (
+          <div>
+            <div style={S.sectionLabel}>Last 30 Days</div>
+            <div className="stat-row" style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+              <StatBox label="Groups Posted" value={fmtNum(t.groups)} color={col.cyan} />
+              <StatBox label="Applications" value={fmtNum(t.apps)} color={col.blue} />
+              <StatBox label="Onboarded" value={fmtNum(t.onboarded)} color={col.accent} />
+              <StatBox label="Posted 1st Video" value={fmtNum(t.firstVideo)} color={col.magenta} />
+            </div>
+            <div className="stat-row" style={{ display: "flex", gap: 10, marginBottom: 28, flexWrap: "wrap" }}>
+              <StatBox label="Active Reposters" value={fmtNum(t.reposters)} color={col.warn} />
+              <StatBox label="On Trial" value={trial} color={col.warn} />
+              <StatBox label="Hired" value={hired} color={col.accent} />
+              <StatBox label="Total Hires" value={hires.length} color={col.cyan} />
+            </div>
+
+            <div style={S.sectionLabel}>Daily Activity (30d)</div>
+            <div style={{ ...S.card, padding: "22px 24px", marginBottom: 24 }}>
+              <TrendBars data={dailyApps} color={col.cyan} height={120} format={fmtNum} label="Applications received" />
+              <div style={{ height: 1, background: col.border, margin: "20px 0" }} />
+              <TrendBars data={dailyOnb} color={col.accent} height={70} format={fmtNum} label="Onboarded" />
+            </div>
+
+            <div style={S.sectionLabel}>Recruiting Funnel (30d)</div>
+            <div style={{ ...S.card, padding: "22px 24px", marginBottom: 24 }}>
+              <Funnel steps={[
+                { label: "Groups posted in", value: t.groups },
+                { label: "Applications received", value: t.apps },
+                { label: "Onboarded", value: t.onboarded },
+                { label: "Posted 1st video", value: t.firstVideo },
+              ]} color={col.cyan} />
+            </div>
+
+            {best && <BestPlatform best={best} ranked={ranked} />}
+
+            <div style={{ ...S.card, textAlign: "center", padding: 24, marginTop: 24 }}>
+              <button style={{ ...btnB, background: col.cyan, boxShadow: `0 4px 24px ${col.glowCyan}` }} onClick={() => setTab("submit")}>+ Submit Today's EOD</button>
+            </div>
+          </div>
+        )}
+
+        {tab === "submit" && (
+          <RecruiterEODForm existing={reports.find(r => r.date === todayStr())} onSubmit={async (eod) => { await onSave(eod); setTab("history"); }} />
+        )}
+
+        {tab === "hires" && <HirePipeline hires={hires} onSaveHire={onSaveHire} onUpdateHire={onUpdateHire} onDeleteHire={onDeleteHire} />}
+
+        {tab === "history" && (
+          <div>
+            <div style={S.sectionLabel}>All EOD Reports</div>
+            {reports.length === 0
+              ? <div style={{ ...S.card, textAlign: "center", color: col.muted, padding: 40 }}>No EOD reports submitted yet.</div>
+              : [...reports].sort((a, b) => b.date.localeCompare(a.date)).map(r => <RecruitEODCard key={r.id || r.date} report={r} />)}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RecruiterEODForm({ existing, onSubmit }) {
+  const [date, setDate] = useState(existing?.date || todayStr());
+  const [activePlatforms, setActivePlatforms] = useState(existing ? Object.keys(existing.platforms || {}) : []);
+  const [platformData, setPlatformData] = useState(existing?.platforms || {});
+  const [notes, setNotes] = useState(existing?.notes || "");
+  const [submitting, setSubmitting] = useState(false);
+
+  const togglePlatform = (p) => {
+    if (activePlatforms.includes(p)) setActivePlatforms(prev => prev.filter(x => x !== p));
+    else {
+      setActivePlatforms(prev => [...prev, p]);
+      if (!platformData[p]) setPlatformData(prev => ({ ...prev, [p]: RECRUIT_FIELDS.reduce((a, f) => ({ ...a, [f.key]: "" }), {}) }));
+    }
+  };
+  const updateField = (platform, key, val) => setPlatformData(prev => ({ ...prev, [platform]: { ...prev[platform], [key]: val } }));
+
+  const handleSubmit = async () => {
+    const platforms = {};
+    activePlatforms.forEach(p => { platforms[p] = RECRUIT_FIELDS.reduce((a, f) => ({ ...a, [f.key]: parseInt(platformData[p]?.[f.key]) || 0 }), {}); });
+    const payload = { date, platforms, notes, submittedAt: new Date().toISOString() };
+    if (existing?.id) payload.id = existing.id;
+    setSubmitting(true);
+    await onSubmit(payload);
+    setSubmitting(false);
+  };
+
+  return (
+    <div>
+      <h3 style={{ fontSize: 20, fontWeight: 800, marginBottom: 6 }}>Recruiter EOD</h3>
+      <p style={{ color: col.muted, fontSize: 14, marginBottom: 20 }}>{existing ? "Updating today's report." : "Fill in your numbers per platform."}</p>
+
+      <div style={S.card}>
+        <label style={S.label}>Report Date</label>
+        <input type="date" style={S.input} value={date} onChange={e => setDate(e.target.value)} />
+      </div>
+
+      <div style={S.card}>
+        <label style={S.label}>Platforms you recruited on today</label>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {RECRUIT_PLATFORMS.map(p => (
+            <button key={p} onClick={() => togglePlatform(p)} style={{
+              padding: "8px 16px", borderRadius: 4, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: font, border: "none",
+              background: activePlatforms.includes(p) ? (RECRUIT_PLATFORM_COLORS[p] || col.cyan) : col.surf2,
+              color: activePlatforms.includes(p) ? "#000" : col.muted,
+            }}>{p}</button>
+          ))}
+        </div>
+      </div>
+
+      {activePlatforms.length === 0 && (
+        <div style={{ ...S.card, textAlign: "center", color: col.muted, padding: 24, fontSize: 13 }}>Select platforms above to enter your numbers.</div>
+      )}
+
+      {activePlatforms.map(p => (
+        <div key={p} style={S.card}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+            <div style={{ width: 8, height: 8, borderRadius: "50%", background: RECRUIT_PLATFORM_COLORS[p] || col.cyan }} />
+            <span style={{ fontSize: 14, fontWeight: 700, color: RECRUIT_PLATFORM_COLORS[p] || col.cyan }}>{p}</span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            {RECRUIT_FIELDS.map(f => (
+              <div key={f.key}>
+                <label style={{ ...S.label, fontSize: 9 }}>{f.label}</label>
+                <input type="number" placeholder="0" style={S.input} value={platformData[p]?.[f.key] || ""} onChange={e => updateField(p, f.key, e.target.value)} />
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+
+      <div style={S.card}>
+        <label style={S.label}>Notes & Observations</label>
+        <textarea style={S.textarea} value={notes} onChange={e => setNotes(e.target.value)} placeholder="What's working, which platform is converting, bottlenecks, ideas..." />
+      </div>
+
+      <button style={{ ...btnB, background: col.cyan, width: "100%", padding: "14px 22px", fontSize: 14, boxShadow: `0 4px 24px ${col.glowCyan}` }} onClick={handleSubmit} disabled={submitting || activePlatforms.length === 0}>
+        {submitting ? "Submitting..." : existing ? "Update EOD Report" : "Submit EOD Report"}
+      </button>
+    </div>
+  );
+}
+
+function RecruitEODCard({ report }) {
+  const [expanded, setExpanded] = useState(false);
+  const platforms = Object.entries(report.platforms || {});
+  const totals = platforms.reduce((acc, [, p]) => {
+    RECRUIT_FIELDS.forEach(f => { acc[f.key] = (acc[f.key] || 0) + (parseInt(p[f.key]) || 0); });
+    return acc;
+  }, {});
+  return (
+    <div style={{ ...S.card, cursor: "pointer" }} onClick={() => setExpanded(!expanded)}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <span style={{ fontWeight: 700, fontSize: 14 }}>{fmtDate(report.date)}</span>
+          <div style={{ display: "flex", gap: 4 }}>
+            {platforms.map(([p]) => <span key={p} style={editBadge(RECRUIT_PLATFORM_COLORS[p] || col.cyan)}>{p === "School Community" ? "School" : p}</span>)}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 14, fontFamily: mono, fontSize: 12 }}>
+          <span style={{ color: col.muted2 }}>{totals.applications || 0} apps</span>
+          <span style={{ color: col.accent }}>{totals.onboarded || 0} onboarded</span>
+        </div>
+      </div>
+      {expanded && (
+        <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${col.border}` }}>
+          {platforms.map(([p, data]) => (
+            <div key={p} style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: RECRUIT_PLATFORM_COLORS[p] || col.cyan, marginBottom: 8 }}>{p}</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 6, fontSize: 12 }}>
+                {RECRUIT_FIELDS.map(f => (
+                  <div key={f.key} style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span style={{ color: col.muted2 }}>{f.label}</span>
+                    <span style={{ fontFamily: mono, fontWeight: 700 }}>{data[f.key] || 0}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+          {report.notes && (
+            <div style={{ marginTop: 12, padding: 12, background: col.surf2, borderRadius: 4 }}>
+              <div style={{ ...S.label, marginBottom: 6 }}>Notes</div>
+              <div style={{ fontSize: 13, color: col.text, whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{report.notes}</div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HIRE PIPELINE
+// ═══════════════════════════════════════════════════════════════════════════
+function HirePipeline({ hires, onSaveHire, onUpdateHire, onDeleteHire }) {
+  const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState("All");
+  const blank = { name: "", role: "", email: "", phone: "", status: "Trial", details: "" };
+  const [f, setF] = useState(blank);
+  const [busy, setBusy] = useState(false);
+
+  const usedRoles = [...new Set(hires.map(h => h.role).filter(r => r && r !== "Unspecified"))];
+  const counts = {
+    All: hires.length,
+    Trial: hires.filter(h => h.status === "Trial").length,
+    Hired: hires.filter(h => h.status === "Hired").length,
+    Dropped: hires.filter(h => h.status === "Dropped").length,
+  };
+  const shown = filter === "All" ? hires : hires.filter(h => h.status === filter);
+
+  const submit = async () => {
+    if (!f.name.trim()) return;
+    setBusy(true);
+    await onSaveHire({ ...f, name: f.name.trim(), role: f.role.trim() || "Unspecified", hireDate: todayStr() });
+    setBusy(false);
+    setF(blank); setOpen(false);
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+        <div style={{ ...S.sectionLabel, marginBottom: 0 }}>Hire Pipeline</div>
+        {!open && <button style={{ ...btnSm, color: col.cyan, borderColor: col.cyan + "55" }} onClick={() => setOpen(true)}>+ Add Hire</button>}
+      </div>
+
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
+        {["All", "Trial", "Hired", "Dropped"].map(s => (
+          <FilterChip key={s} active={filter === s} onClick={() => setFilter(s)} label={s} count={counts[s]} color={s === "All" ? col.text : HIRE_STATUS_COLORS[s]} />
+        ))}
+      </div>
+
+      {open && (
+        <div style={{ ...S.card, background: col.surf2, border: `1px solid ${col.cyan}66`, padding: "20px 22px" }}>
+          <div style={{ fontFamily: mono, fontSize: 10, letterSpacing: "0.15em", color: col.cyan, textTransform: "uppercase", marginBottom: 14 }}>New Hire</div>
+          <div className="row-split" style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+            <div style={{ flex: 1 }}><label style={S.label}>Name</label><input style={S.input} placeholder="Full name" value={f.name} onChange={e => setF({ ...f, name: e.target.value })} autoFocus /></div>
+            <div style={{ flex: 1 }}>
+              <label style={S.label}>Role (type anything)</label>
+              <input list="hire-roles" style={S.input} placeholder="e.g. Video Editor, Reposter…" value={f.role} onChange={e => setF({ ...f, role: e.target.value })} />
+              <datalist id="hire-roles">{usedRoles.map(r => <option key={r} value={r} />)}</datalist>
+            </div>
+          </div>
+          <div className="row-split" style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+            <div style={{ flex: 1 }}><label style={S.label}>Email</label><input type="email" style={S.input} placeholder="name@email.com" value={f.email} onChange={e => setF({ ...f, email: e.target.value })} /></div>
+            <div style={{ flex: 1 }}><label style={S.label}>Phone</label><input type="tel" style={S.input} placeholder="+1…" value={f.phone} onChange={e => setF({ ...f, phone: e.target.value })} /></div>
+            <div style={{ flex: 1 }}><label style={S.label}>Status</label><select style={S.select} value={f.status} onChange={e => setF({ ...f, status: e.target.value })}>{HIRE_STATUSES.map(s => <option key={s}>{s}</option>)}</select></div>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <label style={S.label}>Details / your read on them</label>
+            <textarea style={{ ...S.textarea, minHeight: 80 }} value={f.details} onChange={e => setF({ ...f, details: e.target.value })} placeholder="How do you expect them to perform? Strengths, concerns, context…" />
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button style={{ ...btnB, background: col.cyan, boxShadow: `0 4px 24px ${col.glowCyan}` }} onClick={submit} disabled={busy || !f.name.trim()}>{busy ? "Saving..." : "Add Hire"}</button>
+            <button style={btnG} onClick={() => { setF(blank); setOpen(false); }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+        {shown.map(h => <HireCard key={h.id} h={h} onUpdateHire={onUpdateHire} onDeleteHire={onDeleteHire} />)}
+        {!shown.length && <div style={{ ...S.card, textAlign: "center", color: col.muted, padding: 28 }}>No hires here yet.</div>}
+      </div>
+    </div>
+  );
+}
+
+function HireCard({ h, onUpdateHire, onDeleteHire }) {
+  const [expanded, setExpanded] = useState(false);
+  const sc = HIRE_STATUS_COLORS[h.status] || col.muted;
+  return (
+    <div style={{ ...S.card, padding: "13px 16px", marginBottom: 0 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <span style={{ fontWeight: 700, fontSize: 14 }}>{h.name}</span>
+          <span style={editBadge(col.cyan)}>{h.role}</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <select value={h.status} onChange={e => onUpdateHire(h.id, { status: e.target.value })} style={{
+            background: sc + "22", border: `1px solid ${sc}55`, color: sc, borderRadius: 6, padding: "4px 8px",
+            fontFamily: mono, fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", cursor: "pointer",
+          }}>
+            {HIRE_STATUSES.map(s => <option key={s} value={s} style={{ background: col.surf2, color: col.text }}>{s}</option>)}
+          </select>
+          <button onClick={() => setExpanded(!expanded)} style={{ background: "none", border: "none", color: col.muted, cursor: "pointer", fontFamily: mono, fontSize: 14 }}>{expanded ? "−" : "›"}</button>
+        </div>
+      </div>
+      {expanded && (
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${col.border}`, display: "flex", flexDirection: "column", gap: 8 }}>
+          {h.email && <DetailLine label="Email" value={h.email} />}
+          {h.phone && <DetailLine label="Phone" value={h.phone} />}
+          <DetailLine label="Added" value={fmtDate(h.hireDate)} />
+          {h.details && (
+            <div>
+              <div style={{ ...S.label, marginBottom: 5 }}>Details</div>
+              <div style={{ fontSize: 13, color: col.muted2, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{h.details}</div>
+            </div>
+          )}
+          <div style={{ marginTop: 4 }}>
+            <button style={btnDel} onClick={() => { if (window.confirm("Delete this hire?")) onDeleteHire(h.id); }}>Delete hire</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AdminHireList({ hires, recruiterName }) {
+  const [filter, setFilter] = useState("All");
+  const counts = {
+    All: hires.length,
+    Trial: hires.filter(h => h.status === "Trial").length,
+    Hired: hires.filter(h => h.status === "Hired").length,
+    Dropped: hires.filter(h => h.status === "Dropped").length,
+  };
+  const shown = filter === "All" ? hires : hires.filter(h => h.status === filter);
+  if (!hires.length) return <div style={{ ...S.card, textAlign: "center", color: col.muted, padding: 36 }}>No hires logged yet.</div>;
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+        {["All", "Trial", "Hired", "Dropped"].map(s => (
+          <FilterChip key={s} active={filter === s} onClick={() => setFilter(s)} label={s} count={counts[s]} color={s === "All" ? col.text : HIRE_STATUS_COLORS[s]} />
+        ))}
+      </div>
+      {shown.map(h => {
+        const sc = HIRE_STATUS_COLORS[h.status] || col.muted;
+        return (
+          <div key={h.id} style={{ ...S.card, padding: "13px 16px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <span style={{ fontWeight: 700, fontSize: 14 }}>{h.name}</span>
+                <span style={editBadge(col.cyan)}>{h.role}</span>
+                <span style={editBadge(sc)}>{h.status}</span>
+              </div>
+              <span style={{ fontFamily: mono, fontSize: 10, color: col.muted }}>{recruiterName ? `by ${recruiterName(h.recruiterId)} · ` : ""}{fmtDate(h.hireDate)}</span>
+            </div>
+            {(h.email || h.phone || h.details) && (
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${col.border}`, display: "flex", flexDirection: "column", gap: 6 }}>
+                {h.email && <DetailLine label="Email" value={h.email} />}
+                {h.phone && <DetailLine label="Phone" value={h.phone} />}
+                {h.details && <div style={{ fontSize: 13, color: col.muted2, lineHeight: 1.5, whiteSpace: "pre-wrap", marginTop: 4 }}>{h.details}</div>}
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {!shown.length && <div style={{ ...S.card, textAlign: "center", color: col.muted, padding: 28 }}>No hires in this view.</div>}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ADMIN: EDITORS
+// ═══════════════════════════════════════════════════════════════════════════
+function AdminEditorsView({ editors, editsMap, onRemove, onSelect }) {
+  const cutoff = daysAgo(30);
+  const stats = useMemo(() => editors.map(ed => {
+    const all = editsMap[ed.id] || [];
+    const last30 = all.filter(e => (e.editDate || "") >= cutoff);
+    return { ...ed, totalEdits: all.length,
+      vids30: last30.reduce((s, e) => s + editCnt(e), 0),
+      mins30: last30.reduce((s, e) => s + (parseInt(e.timeMin) || 0), 0),
+      daily: dailyBucket(all, e => e.editDate, e => editCnt(e), 30) };
+  }).sort((a, b) => b.vids30 - a.vids30), [editors, editsMap, cutoff]);
+
+  const totalVids = stats.reduce((s, e) => s + e.vids30, 0);
+  const totalMin = stats.reduce((s, e) => s + e.mins30, 0);
+
+  let clients = 0, outscript = 0;
+  const byType = EDIT_TYPES.map(t => ({ label: t, value: 0 }));
+  Object.values(editsMap).forEach(list => list.filter(e => (e.editDate || "") >= cutoff).forEach(e => {
+    if (e.editedFor === "Clients") clients += editCnt(e);
+    if (e.editedFor === "OutScript") outscript += editCnt(e);
+    const bt = byType.find(b => b.label === e.type); if (bt) bt.value += editCnt(e);
+  }));
+
+  return (
+    <div>
+      <div style={S.sectionLabel}>Last 30 Days · All Editors</div>
+      <div className="stat-row" style={{ display: "flex", gap: 10, marginBottom: 24, flexWrap: "wrap" }}>
+        <StatBox label="Videos Edited" value={totalVids} color={col.magenta} />
+        <StatBox label="Total Time" value={minToStr(totalMin)} color={col.warn} />
+        <StatBox label="For Clients" value={clients} color={col.accent} />
+        <StatBox label="For OutScript" value={outscript} color={col.blue} />
+      </div>
+
+      <div style={S.sectionLabel}>By Type (30d)</div>
+      <div style={{ ...S.card, padding: "20px 22px", marginBottom: 24 }}><TypeBars data={byType} color={col.magenta} /></div>
+
+      {stats.filter(s => s.vids30 > 0).length > 0 && (
+        <Podium items={stats.filter(s => s.vids30 > 0).map(s => ({ id: s.id, name: s.name, value: s.vids30, sub: minToStr(s.mins30) }))}
+          color={col.magenta} valueFmt={(v) => `${v} vids`} onClick={onSelect} />
+      )}
+
+      <div style={{ ...S.sectionLabel, marginBottom: 12 }}>Editor Leaderboard</div>
+      {stats.length === 0
+        ? <div style={{ ...S.card, textAlign: "center", color: col.muted, padding: 40 }}>No editors yet.</div>
+        : stats.map((e, i) => (
+          <div key={e.id} style={{ ...S.card, display: "flex", alignItems: "center", gap: 14, cursor: "pointer" }} onClick={() => onSelect(e.id)} className="clickable-card">
+            <div style={{ fontFamily: mono, fontSize: 13, fontWeight: 800, color: i < 3 ? col.magenta : col.muted, minWidth: 28 }}>#{i + 1}</div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 3 }}>{e.name}</div>
+              <div style={{ fontSize: 12, color: col.muted }}>{e.vids30} vids · 30d · {minToStr(e.mins30)} · {e.totalEdits} entries</div>
+            </div>
+            <div style={{ flexShrink: 0, opacity: e.vids30 > 0 ? 1 : 0.3 }}><Sparkline data={e.daily} color={col.magenta} height={32} width={100} /></div>
+            <div style={{ textAlign: "right", flexShrink: 0, minWidth: 70 }}>
+              <div style={{ fontFamily: mono, fontSize: 17, fontWeight: 700, color: col.magenta }}>{e.vids30}</div>
+              <div style={{ fontSize: 11, color: col.muted }}>30d vids</div>
+            </div>
+            <button style={btnDel} onClick={ev => { ev.stopPropagation(); if (window.confirm(`Remove ${e.name}?`)) onRemove(e.id); }}>✕</button>
+          </div>
+        ))}
+    </div>
+  );
+}
+
+function AdminEditorDetail({ editor, edits, onBack }) {
+  const cutoff = daysAgo(30);
+  const last30 = edits.filter(e => (e.editDate || "") >= cutoff);
+  const vids30 = last30.reduce((s, e) => s + editCnt(e), 0);
+  const mins30 = last30.reduce((s, e) => s + (parseInt(e.timeMin) || 0), 0);
+  const allVids = edits.reduce((s, e) => s + editCnt(e), 0);
+  const byType = EDIT_TYPES.map(t => ({ label: t, value: last30.filter(e => e.type === t).reduce((s, e) => s + editCnt(e), 0) }));
+  const dailyVids = useMemo(() => dailyBucket(edits, e => e.editDate, e => editCnt(e), 30), [edits]);
+
+  return (
+    <div style={S.page}>
+      <div style={S.inner}>
+        <button style={{ ...btnG, padding: "8px 16px", fontSize: 12, marginBottom: 28 }} onClick={onBack}>← Dashboard</button>
+        <div style={{ marginBottom: 28 }}>
+          <div style={{ fontFamily: mono, fontSize: 10, letterSpacing: "0.2em", color: col.magenta, textTransform: "uppercase", marginBottom: 8 }}>Video Editor Profile</div>
+          <h1 style={{ fontSize: 28, fontWeight: 800, letterSpacing: "-0.02em" }}>{editor.name}</h1>
+        </div>
+
+        <div className="stat-row" style={{ display: "flex", gap: 10, marginBottom: 28, flexWrap: "wrap" }}>
+          <StatBox label="Videos 30d" value={vids30} color={col.magenta} />
+          <StatBox label="Time 30d" value={minToStr(mins30)} color={col.warn} />
+          <StatBox label="Avg / Video" value={vids30 ? minToStr(Math.round(mins30 / vids30)) : "0m"} />
+          <StatBox label="All-Time Vids" value={allVids} color={col.accent} />
+        </div>
+
+        <div style={S.sectionLabel}>Daily Output (30d)</div>
+        <div style={{ ...S.card, padding: "22px 24px", marginBottom: 28 }}>
+          <TrendBars data={dailyVids} color={col.magenta} height={150} format={(v) => v} label="Videos edited per day" />
+        </div>
+
+        <div style={S.sectionLabel}>By Type (30d)</div>
+        <div style={{ ...S.card, padding: "20px 22px", marginBottom: 28 }}><TypeBars data={byType} color={col.magenta} /></div>
+
+        <div style={S.sectionLabel}>All Edits ({edits.length})</div>
+        {edits.length === 0
+          ? <div style={{ ...S.card, textAlign: "center", color: col.muted, padding: 36 }}>No edits logged yet.</div>
+          : [...edits].sort((a, b) => (b.editDate || "").localeCompare(a.editDate || "")).map(e => (
+            <div key={e.id} style={{ ...S.card, display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5, flexWrap: "wrap" }}>
+                  <span style={editBadge(col.magenta)}>{e.type}</span>
+                  <span style={editBadge(e.editedFor === "Clients" ? col.accent : col.blue)}>{e.editedFor}</span>
+                  {editCnt(e) > 1 && <span style={editBadge(col.warn)}>{editCnt(e)} videos</span>}
+                  <span style={{ fontSize: 11, color: col.muted }}>{fmtDate(e.editDate)}</span>
+                </div>
+                <a href={e.url} target="_blank" rel="noreferrer" style={{ fontSize: 11, fontFamily: mono, color: col.muted2, textDecoration: "none", display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.url}</a>
+              </div>
+              <div style={{ fontFamily: mono, fontSize: 14, fontWeight: 700, color: col.warn, flexShrink: 0 }}>{minToStr(e.timeMin)}</div>
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ADMIN: RECRUITERS
+// ═══════════════════════════════════════════════════════════════════════════
+function AdminRecruitersView({ recruiters, recruitMap, hires, onRemove, onSelect }) {
+  const cutoff = daysAgo(30);
+  const stats = useMemo(() => recruiters.map(r => {
+    const reps = (recruitMap[r.id] || []).filter(x => (x.date || "") >= cutoff);
+    return { ...r,
+      groups: reps.reduce((s, x) => s + eodTotal(x, "groups"), 0),
+      apps: reps.reduce((s, x) => s + eodTotal(x, "applications"), 0),
+      onboarded: reps.reduce((s, x) => s + eodTotal(x, "onboarded"), 0),
+      firstVideo: reps.reduce((s, x) => s + eodTotal(x, "firstVideo"), 0),
+      daily: dailyBucket(recruitMap[r.id] || [], x => x.date, x => eodTotal(x, "onboarded"), 30) };
+  }).sort((a, b) => b.onboarded - a.onboarded), [recruiters, recruitMap, cutoff]);
+
+  const team = stats.reduce((a, s) => ({ groups: a.groups + s.groups, apps: a.apps + s.apps, onboarded: a.onboarded + s.onboarded, firstVideo: a.firstVideo + s.firstVideo }), { groups: 0, apps: 0, onboarded: 0, firstVideo: 0 });
+
+  const allReports = Object.values(recruitMap).flat().filter(x => (x.date || "") >= cutoff);
+  const ranked = recruitPlatformStats(allReports).sort((a, b) => b.onboardPerGroup - a.onboardPerGroup || b.onboarded - a.onboarded);
+  const best = ranked[0];
+  const recruiterName = (id) => recruiters.find(r => r.id === id)?.name || "—";
+
+  return (
+    <div>
+      <div style={S.sectionLabel}>Last 30 Days · All Recruiters</div>
+      <div className="stat-row" style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+        <StatBox label="Groups Posted" value={fmtNum(team.groups)} color={col.cyan} />
+        <StatBox label="Applications" value={fmtNum(team.apps)} color={col.blue} />
+        <StatBox label="Onboarded" value={fmtNum(team.onboarded)} color={col.accent} />
+        <StatBox label="Posted 1st Video" value={fmtNum(team.firstVideo)} color={col.magenta} />
+      </div>
+      <div className="stat-row" style={{ display: "flex", gap: 10, marginBottom: 24, flexWrap: "wrap" }}>
+        <StatBox label="On Trial" value={hires.filter(h => h.status === "Trial").length} color={col.warn} />
+        <StatBox label="Hired" value={hires.filter(h => h.status === "Hired").length} color={col.accent} />
+        <StatBox label="Total Hires" value={hires.length} color={col.cyan} />
+      </div>
+
+      <div style={S.sectionLabel}>Team Recruiting Funnel (30d)</div>
+      <div style={{ ...S.card, padding: "22px 24px", marginBottom: 24 }}>
+        <Funnel steps={[
+          { label: "Groups posted in", value: team.groups },
+          { label: "Applications received", value: team.apps },
+          { label: "Onboarded", value: team.onboarded },
+          { label: "Posted 1st video", value: team.firstVideo },
+        ]} color={col.cyan} />
+      </div>
+
+      {best && <BestPlatform best={best} ranked={ranked} />}
+
+      {stats.filter(s => s.onboarded > 0).length > 0 && (
+        <Podium items={stats.filter(s => s.onboarded > 0).map(s => ({ id: s.id, name: s.name, value: s.onboarded, sub: `${s.apps} apps` }))}
+          color={col.cyan} valueFmt={(v) => `${v} onb`} onClick={onSelect} />
+      )}
+
+      <div style={{ ...S.sectionLabel, marginBottom: 12 }}>Recruiter Leaderboard</div>
+      {stats.length === 0
+        ? <div style={{ ...S.card, textAlign: "center", color: col.muted, padding: 40 }}>No recruiters yet.</div>
+        : stats.map((s, i) => (
+          <div key={s.id} style={{ ...S.card, display: "flex", alignItems: "center", gap: 14, cursor: "pointer" }} onClick={() => onSelect(s.id)} className="clickable-card">
+            <div style={{ fontFamily: mono, fontSize: 13, fontWeight: 800, color: i < 3 ? col.cyan : col.muted, minWidth: 28 }}>#{i + 1}</div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 3 }}>{s.name}</div>
+              <div style={{ fontSize: 12, color: col.muted }}>{s.apps} apps · {s.groups} groups · 30d</div>
+            </div>
+            <div style={{ flexShrink: 0, opacity: s.onboarded > 0 ? 1 : 0.3 }}><Sparkline data={s.daily} color={col.cyan} height={32} width={100} /></div>
+            <div style={{ textAlign: "right", flexShrink: 0, minWidth: 80 }}>
+              <div style={{ fontFamily: mono, fontSize: 17, fontWeight: 700, color: col.cyan }}>{s.onboarded}</div>
+              <div style={{ fontSize: 11, color: col.muted }}>onboarded</div>
+            </div>
+            <button style={btnDel} onClick={ev => { ev.stopPropagation(); if (window.confirm(`Remove ${s.name}?`)) onRemove(s.id); }}>✕</button>
+          </div>
+        ))}
+
+      <div style={{ ...S.sectionLabel, marginTop: 28 }}>All Hires ({hires.length})</div>
+      <AdminHireList hires={hires} recruiterName={recruiterName} />
+    </div>
+  );
+}
+
+function AdminRecruiterDetail({ recruiter, reports, hires, onBack }) {
+  const cutoff = daysAgo(30);
+  const last30 = reports.filter(r => (r.date || "") >= cutoff);
+  const t = {
+    groups: last30.reduce((s, r) => s + eodTotal(r, "groups"), 0),
+    apps: last30.reduce((s, r) => s + eodTotal(r, "applications"), 0),
+    onboarded: last30.reduce((s, r) => s + eodTotal(r, "onboarded"), 0),
+    firstVideo: last30.reduce((s, r) => s + eodTotal(r, "firstVideo"), 0),
+    reposters: last30.reduce((s, r) => s + eodTotal(r, "reposters"), 0),
+  };
+  const ranked = recruitPlatformStats(last30).sort((a, b) => b.onboardPerGroup - a.onboardPerGroup || b.onboarded - a.onboarded);
+  const best = ranked[0];
+  const dailyApps = useMemo(() => dailyBucket(reports, r => r.date, r => eodTotal(r, "applications"), 30), [reports]);
+  const dailyOnb = useMemo(() => dailyBucket(reports, r => r.date, r => eodTotal(r, "onboarded"), 30), [reports]);
+  const allNotes = [...reports].filter(r => r.notes?.trim()).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 10);
+
+  return (
+    <div style={S.page}>
+      <div style={S.inner}>
+        <button style={{ ...btnG, padding: "8px 16px", fontSize: 12, marginBottom: 28 }} onClick={onBack}>← Dashboard</button>
+        <div style={{ marginBottom: 28 }}>
+          <div style={{ fontFamily: mono, fontSize: 10, letterSpacing: "0.2em", color: col.cyan, textTransform: "uppercase", marginBottom: 8 }}>Recruiter Profile</div>
+          <h1 style={{ fontSize: 28, fontWeight: 800, letterSpacing: "-0.02em" }}>{recruiter.name}</h1>
+        </div>
+
+        <div style={S.sectionLabel}>Last 30 Days</div>
+        <div className="stat-row" style={{ display: "flex", gap: 10, marginBottom: 24, flexWrap: "wrap" }}>
+          <StatBox label="Groups" value={fmtNum(t.groups)} color={col.cyan} />
+          <StatBox label="Applications" value={fmtNum(t.apps)} color={col.blue} />
+          <StatBox label="Onboarded" value={fmtNum(t.onboarded)} color={col.accent} />
+          <StatBox label="1st Video" value={fmtNum(t.firstVideo)} color={col.magenta} />
+          <StatBox label="Reposters" value={fmtNum(t.reposters)} color={col.warn} />
+        </div>
+
+        <div style={S.sectionLabel}>Daily Activity (30d)</div>
+        <div style={{ ...S.card, padding: "22px 24px", marginBottom: 24 }}>
+          <TrendBars data={dailyApps} color={col.cyan} height={120} format={fmtNum} label="Applications received" />
+          <div style={{ height: 1, background: col.border, margin: "20px 0" }} />
+          <TrendBars data={dailyOnb} color={col.accent} height={70} format={fmtNum} label="Onboarded" />
+        </div>
+
+        <div style={S.sectionLabel}>Conversion Funnel (30d)</div>
+        <div style={{ ...S.card, padding: "22px 24px", marginBottom: 24 }}>
+          <Funnel steps={[
+            { label: "Groups posted in", value: t.groups },
+            { label: "Applications received", value: t.apps },
+            { label: "Onboarded", value: t.onboarded },
+            { label: "Posted 1st video", value: t.firstVideo },
+          ]} color={col.cyan} />
+        </div>
+
+        {best && <BestPlatform best={best} ranked={ranked} />}
+
+        <div style={S.sectionLabel}>Hires ({hires.length})</div>
+        <AdminHireList hires={hires} />
+
+        {allNotes.length > 0 && (
+          <>
+            <div style={{ ...S.sectionLabel, marginTop: 28 }}>Recent Notes & Observations</div>
+            {allNotes.map(r => (
+              <div key={r.id || r.date} style={{ ...S.card, padding: "14px 18px" }}>
+                <div style={{ fontFamily: mono, fontSize: 11, color: col.muted, marginBottom: 6 }}>{fmtDate(r.date)}</div>
+                <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{r.notes}</div>
+              </div>
+            ))}
+          </>
+        )}
+
+        <div style={{ ...S.sectionLabel, marginTop: 28 }}>All EOD Reports ({reports.length})</div>
+        {reports.length === 0
+          ? <div style={{ ...S.card, textAlign: "center", color: col.muted, padding: 36 }}>No EOD reports yet.</div>
+          : [...reports].sort((a, b) => b.date.localeCompare(a.date)).map(r => <RecruitEODCard key={r.id || r.date} report={r} />)}
       </div>
     </div>
   );

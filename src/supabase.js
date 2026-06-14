@@ -103,21 +103,33 @@ export const dataLayer = {
    * tens of thousands of rows; past that, switch to lazy loads per screen.
    */
   async loadAll() {
-    const [c, s, v, e, l] = await Promise.all([
+    const [c, s, v, e, l, ed, rc, ev, rr, hh] = await Promise.all([
       sb.from("creators").select("*").order("created_at", { ascending: true }),
       sb.from("setters").select("*").order("created_at", { ascending: true }),
       sb.from("videos").select("*"),
       sb.from("eod_reports").select("*"),
       sb.from("leads").select("*"),
+      sb.from("editors").select("*").order("created_at", { ascending: true }),
+      sb.from("recruiters").select("*").order("created_at", { ascending: true }),
+      sb.from("edits").select("*"),
+      sb.from("recruit_reports").select("*"),
+      sb.from("hires").select("*"),
     ]);
     must(c.error, "load creators");
     must(s.error, "load setters");
     must(v.error, "load videos");
     must(e.error, "load eods");
     must(l.error, "load leads");
+    must(ed.error, "load editors");
+    must(rc.error, "load recruiters");
+    must(ev.error, "load edits");
+    must(rr.error, "load recruit_reports");
+    must(hh.error, "load hires");
 
     const creators = (c.data || []).map(rowToApp);
     const setters = (s.data || []).map(rowToApp);
+    const editors = (ed.data || []).map(rowToApp);
+    const recruiters = (rc.data || []).map(rowToApp);
 
     const videosMap = {};
     creators.forEach((cr) => (videosMap[cr.id] = []));
@@ -141,7 +153,32 @@ export const dataLayer = {
       (leadsMap[a.setterId] ||= []).push(a);
     });
 
-    return { creators, setters, videosMap, eodMap, leadsMap };
+    const editsMap = {};
+    editors.forEach((ee) => (editsMap[ee.id] = []));
+    (ev.data || []).forEach((row) => {
+      const a = rowToApp(row);
+      (editsMap[a.editorId] ||= []).push(a);
+    });
+
+    const recruitMap = {};
+    const hiresMap = {};
+    recruiters.forEach((rcr) => {
+      recruitMap[rcr.id] = [];
+      hiresMap[rcr.id] = [];
+    });
+    (rr.data || []).forEach((row) => {
+      const a = rowToApp(row);
+      (recruitMap[a.recruiterId] ||= []).push(a);
+    });
+    (hh.data || []).forEach((row) => {
+      const a = rowToApp(row);
+      (hiresMap[a.recruiterId] ||= []).push(a);
+    });
+
+    return {
+      creators, setters, videosMap, eodMap, leadsMap,
+      editors, recruiters, editsMap, recruitMap, hiresMap,
+    };
   },
 
   // ── Creators ──────────────────────────────────────────────────────────
@@ -243,6 +280,93 @@ export const dataLayer = {
     must(error, "deleteLead");
   },
 
+  // ── Editors ───────────────────────────────────────────────────────────
+  async addEditor(name) {
+    const { data, error } = await sb.from("editors").insert({ name }).select().single();
+    must(error, "addEditor");
+    return rowToApp(data);
+  },
+  async removeEditor(id) {
+    const { error } = await sb.from("editors").delete().eq("id", id);
+    must(error, "removeEditor");
+  },
+
+  // ── Edits (one row per logged edit / folder of edits) ─────────────────
+  async saveEdit(editorId, edit) {
+    const row = appToRow({ ...edit, editorId, lastUpdated: new Date().toISOString() });
+    delete row.created_at;
+    if (row.id) {
+      const id = row.id;
+      delete row.id;
+      const { data, error } = await sb.from("edits").update(row).eq("id", id).select().single();
+      must(error, "updateEdit");
+      return rowToApp(data);
+    }
+    delete row.id;
+    const { data, error } = await sb.from("edits").insert(row).select().single();
+    must(error, "insertEdit");
+    return rowToApp(data);
+  },
+  async deleteEdit(editId) {
+    const { error } = await sb.from("edits").delete().eq("id", editId);
+    must(error, "deleteEdit");
+  },
+
+  // ── Recruiters ────────────────────────────────────────────────────────
+  async addRecruiter(name) {
+    const { data, error } = await sb.from("recruiters").insert({ name }).select().single();
+    must(error, "addRecruiter");
+    return rowToApp(data);
+  },
+  async removeRecruiter(id) {
+    const { error } = await sb.from("recruiters").delete().eq("id", id);
+    must(error, "removeRecruiter");
+  },
+
+  // ── Recruiter EOD reports (upsert on recruiter_id + date) ─────────────
+  async saveRecruitEOD(recruiterId, eod) {
+    const row = appToRow({ ...eod, recruiterId, lastUpdated: new Date().toISOString() });
+    delete row.created_at;
+    if (!row.id) delete row.id;
+    const { data, error } = await sb
+      .from("recruit_reports")
+      .upsert(row, { onConflict: "recruiter_id,date" })
+      .select()
+      .single();
+    must(error, "saveRecruitEOD");
+    return rowToApp(data);
+  },
+
+  // ── Hires (recruiter-owned candidate pipeline) ────────────────────────
+  async saveHire(recruiterId, hire) {
+    const row = appToRow({ ...hire, recruiterId, lastUpdated: new Date().toISOString() });
+    delete row.created_at;
+    if (row.id) {
+      const id = row.id;
+      delete row.id;
+      const { data, error } = await sb.from("hires").update(row).eq("id", id).select().single();
+      must(error, "updateHire");
+      return rowToApp(data);
+    }
+    delete row.id;
+    const { data, error } = await sb.from("hires").insert(row).select().single();
+    must(error, "insertHire");
+    return rowToApp(data);
+  },
+  // Partial update (e.g. status change from the card dropdown)
+  async updateHire(id, patch) {
+    const row = appToRow({ ...patch, lastUpdated: new Date().toISOString() });
+    delete row.id;
+    delete row.created_at;
+    const { data, error } = await sb.from("hires").update(row).eq("id", id).select().single();
+    must(error, "updateHirePatch");
+    return rowToApp(data);
+  },
+  async deleteHire(id) {
+    const { error } = await sb.from("hires").delete().eq("id", id);
+    must(error, "deleteHire");
+  },
+
   // ── Profiles (auth-linked) ───────────────────────────────────────────
   async loadProfile(userId) {
     const { data, error } = await sb
@@ -290,8 +414,8 @@ export const dataLayer = {
     must(error, "listInvites");
     return (data || []).map(rowToApp);
   },
-  async createInvite({ email, isAdmin = false, creatorId = null, setterId = null }) {
-    const row = appToRow({ email: email.trim().toLowerCase(), isAdmin: !!isAdmin, creatorId, setterId });
+  async createInvite({ email, isAdmin = false, creatorId = null, setterId = null, editorId = null, recruiterId = null }) {
+    const row = appToRow({ email: email.trim().toLowerCase(), isAdmin: !!isAdmin, creatorId, setterId, editorId, recruiterId });
     const { data, error } = await sb
       .from("pending_invites")
       .upsert(row, { onConflict: "email" })
@@ -307,7 +431,7 @@ export const dataLayer = {
    *
    * Roles are non-exclusive — a user can be any combination of admin / creator / setter.
    */
-  async assignByEmail({ email, isAdmin = false, creatorId = null, setterId = null }) {
+  async assignByEmail({ email, isAdmin = false, creatorId = null, setterId = null, editorId = null, recruiterId = null }) {
     const cleanEmail = email.trim().toLowerCase();
     const { data: existing, error: lookupErr } = await sb
       .from("profiles")
@@ -319,13 +443,13 @@ export const dataLayer = {
     if (existing) {
       const { error } = await sb
         .from("profiles")
-        .update(appToRow({ isAdmin: !!isAdmin, creatorId, setterId }))
+        .update(appToRow({ isAdmin: !!isAdmin, creatorId, setterId, editorId, recruiterId }))
         .eq("id", existing.id);
       must(error, "assignByEmail.update");
       return { applied: "profile" };
     }
 
-    const row = appToRow({ email: cleanEmail, isAdmin: !!isAdmin, creatorId, setterId });
+    const row = appToRow({ email: cleanEmail, isAdmin: !!isAdmin, creatorId, setterId, editorId, recruiterId });
     const { error } = await sb
       .from("pending_invites")
       .upsert(row, { onConflict: "email" });
@@ -354,6 +478,11 @@ export const dataLayer = {
       .on("postgres_changes", { event: "*", schema: "public", table: "videos" }, (payload) => onChange("videos", payload))
       .on("postgres_changes", { event: "*", schema: "public", table: "eod_reports" }, (payload) => onChange("eod_reports", payload))
       .on("postgres_changes", { event: "*", schema: "public", table: "leads" }, (payload) => onChange("leads", payload))
+      .on("postgres_changes", { event: "*", schema: "public", table: "editors" }, (payload) => onChange("editors", payload))
+      .on("postgres_changes", { event: "*", schema: "public", table: "recruiters" }, (payload) => onChange("recruiters", payload))
+      .on("postgres_changes", { event: "*", schema: "public", table: "edits" }, (payload) => onChange("edits", payload))
+      .on("postgres_changes", { event: "*", schema: "public", table: "recruit_reports" }, (payload) => onChange("recruit_reports", payload))
+      .on("postgres_changes", { event: "*", schema: "public", table: "hires" }, (payload) => onChange("hires", payload))
       .subscribe();
     return {
       unsubscribe: () => sb.removeChannel(channel),
